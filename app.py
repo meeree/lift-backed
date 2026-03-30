@@ -1,6 +1,5 @@
 from io import BytesIO
 from flask_cors import CORS
-CORS(app)
 
 import matplotlib
 matplotlib.use("Agg")
@@ -11,6 +10,7 @@ import numpy as np
 
 app = Flask(__name__)
 
+CORS(app)
 
 @app.route("/")
 def index():
