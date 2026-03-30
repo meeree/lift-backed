@@ -9,15 +9,15 @@ from flask import Flask, Response, render_template, request
 import numpy as np
 
 app = Flask(__name__)
-
 CORS(app)
+
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
 
-def my_grid(df, vmin=None, vmax=None, increment=10):
+def my_grid(df, vmin=None, vmax=None, increment=10, title="PR Bingo Chart"):
     sets = np.arange(1, 11)
     reps = np.arange(1, 9)
     grid = np.stack(np.meshgrid(reps, sets))
@@ -27,7 +27,6 @@ def my_grid(df, vmin=None, vmax=None, increment=10):
     times = []
 
     def add_point(s, r, v, m, d, y):
-        print(f"Sets: {s} Reps: {r}, Date: {m}/{d}/{y}")
         vals[s - 1, r - 1] = v
         record.append([s - 1, r - 1, v])
 
@@ -56,7 +55,6 @@ def my_grid(df, vmin=None, vmax=None, increment=10):
         for j in range(1, vals.shape[1] + 1):
             envelope[:i, :j] = np.maximum(envelope[i - 1, j - 1], envelope[:i, :j])
 
-    # Auto-detect bounds from real values if user leaves them blank
     finite_vals = envelope[np.isfinite(envelope)]
     if finite_vals.size == 0:
         auto_vmin, auto_vmax = 0, 100
@@ -92,7 +90,7 @@ def my_grid(df, vmin=None, vmax=None, increment=10):
 
     plt.yticks(np.arange(0, vals.shape[0]), np.arange(1, vals.shape[0] + 1))
     plt.xticks(np.arange(0, vals.shape[1]), np.arange(1, vals.shape[1] + 1))
-    plt.colorbar(ticks=np.arange(vmin + increment/2, vmax + 3*increment/2, increment))
+    plt.colorbar(ticks=np.arange(vmin + increment / 2, vmax + 3 * increment / 2, increment))
 
     if len(record) > 0:
         record = np.array(record).T
@@ -100,7 +98,7 @@ def my_grid(df, vmin=None, vmax=None, increment=10):
 
     plt.xlabel("Reps", fontsize=14)
     plt.ylabel("Sets", fontsize=14)
-    plt.title("PR Bingo Chart", fontsize=14)
+    plt.title(title, fontsize=14)
     plt.tight_layout()
     return fig
 
@@ -118,6 +116,8 @@ def plot_png():
             return Response("No lifts provided.", status=400)
 
         controls = data.get("controls", {})
+        lift_name = data.get("lift_name", "PR Bingo Chart")
+
         vmin = controls.get("vmin")
         vmax = controls.get("vmax")
         increment = controls.get("increment", 10)
@@ -147,7 +147,7 @@ def plot_png():
 
         df = df.sort_values("date")
 
-        fig = my_grid(df, vmin=vmin, vmax=vmax, increment=increment)
+        fig = my_grid(df, vmin=vmin, vmax=vmax, increment=increment, title=lift_name)
 
         buf = BytesIO()
         fig.savefig(buf, format="png", dpi=150)
