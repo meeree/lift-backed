@@ -18,8 +18,10 @@ def index():
 
 
 def my_grid(df, vmin=None, vmax=None, increment=10, title="PR Bingo Chart"):
-    sets = np.arange(1, 11)
-    reps = np.arange(1, 9)
+    max_sets = max(10, df["sets"].max())
+    max_reps = max(8, df["reps"].max())
+    sets = np.arange(1, max_sets+1)
+    reps = np.arange(1, max_reps+1)
     grid = np.stack(np.meshgrid(reps, sets))
     vals = np.zeros(grid[0].shape)
     vals += np.nan
