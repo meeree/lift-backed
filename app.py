@@ -61,7 +61,7 @@ def my_grid(df, vmin=None, vmax=None, increment=10, title="PR Bingo Chart"):
     if finite_vals.size == 0:
         auto_vmin, auto_vmax = 0, 100
     else:
-        auto_vmin = int(np.floor(finite_vals.min() / increment) * increment)
+        auto_vmin = int(np.floor(finite_vals[finite_vals > 0].min() / increment) * increment)
         auto_vmax = int(np.ceil(finite_vals.max() / increment) * increment)
 
     if vmin is None:
