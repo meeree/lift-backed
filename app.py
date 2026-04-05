@@ -315,8 +315,8 @@ def make_session_summary_plot(df: pd.DataFrame, months_back=None, title="Session
         ax.grid(True, axis="y", color=grid_color, alpha=0.35, linewidth=0.8)
         ax.grid(False, axis="x")
 
-    ax2.plot(x, max_weight, color=weight_color, linewidth=1.9, alpha=0.9)
-    ax2.bar(x, max_weight, width=bar_width, color=weight_fill, edgecolor=weight_color, linewidth=1.2, alpha=0.9)
+    ax1.plot(x, max_weight, color=weight_color, linewidth=1.9, alpha=0.9)
+    ax1.bar(x, max_weight, width=bar_width, color=weight_fill, edgecolor=weight_color, linewidth=1.2, alpha=0.9)
     ax1.set_ylabel("Max Weight", color=text_color, fontsize=11)
 
     ax2.bar(x, volume, width=bar_width, color=volume_fill, edgecolor=volume_color, linewidth=1.2, alpha=0.9)
