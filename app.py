@@ -283,28 +283,65 @@ def make_session_summary_plot(df: pd.DataFrame, months_back=None, title="Session
     time_lookup = {pd.Timestamp(d).normalize(): t for d, t in zip(unique_dates, normalized_times)}
     x = np.array([time_lookup[pd.Timestamp(d).normalize()] for d in daily["date"]], dtype=float)
 
-    fig, ax1 = plt.subplots(figsize=(8, 3.8))
-    ax2 = ax1.twinx()
+    max_weight = daily["max_weight"].to_numpy(dtype=float)
+    volume = daily["volume"].to_numpy(dtype=float)
 
-    ax1.plot(x, daily["max_weight"].to_numpy(dtype=float), marker="o", linewidth=3.5, color = '#0A2342')
-    ax2.plot(x, daily["volume"].to_numpy(dtype=float), marker="s", linewidth=3.5, color = '#EF5B5B')
+    fig, (ax1, ax2) = plt.subplots(
+        2,
+        1,
+        figsize=(8.2, 5.2),
+        sharex=True,
+        gridspec_kw={"height_ratios": [1, 1], "hspace": 0.12},
+    )
 
-    ax1.set_title(title, fontsize=14)
-    ax1.set_ylabel("Max Weight", fontsize=12)
-    ax2.set_ylabel("Volume", fontsize=12)
-    ax1.set_xlabel("Session Day", fontsize=12)
+    fig.patch.set_facecolor("#171a21")
+    panel_color = "#1d2230"
+    grid_color = "#3a4458"
+    spine_color = "#2a3140"
+    text_color = "#e8ecf1"
+    muted_text = "#a8b0bd"
+    weight_color = "#8fd3ff"
+    weight_fill = "#2f6ea5"
+    volume_color = "#79d79b"
+    volume_fill = "#2f7a53"
 
-    ax1.set_xticks(x)
-    ax1.set_xticklabels([""] * len(x))
+    bar_width = 0.018 if len(x) > 1 else 0.05
 
-    ax1.grid(True, axis="y", alpha=0.25)
+    for ax in (ax1, ax2):
+        ax.set_facecolor(panel_color)
+        for spine in ax.spines.values():
+            spine.set_color(spine_color)
+        ax.tick_params(colors=muted_text, labelsize=9)
+        ax.grid(True, axis="y", color=grid_color, alpha=0.35, linewidth=0.8)
+        ax.grid(False, axis="x")
+
+    ax1.fill_between(x, max_weight, 0, color=weight_fill, alpha=0.35, zorder=1)
+    ax1.plot(x, max_weight, color=weight_color, linewidth=2.8, marker="o", markersize=5.5, zorder=2)
+    ax1.set_ylabel("Weight", color=text_color, fontsize=11)
+    ax1.set_title("Max Weight", color=text_color, fontsize=11, pad=8)
+
+    ax2.bar(x, volume, width=bar_width, color=volume_fill, edgecolor=volume_color, linewidth=1.2, alpha=0.9)
+    ax2.plot(x, volume, color=volume_color, linewidth=1.7, alpha=0.9)
+    ax2.set_ylabel("Volume", color=text_color, fontsize=11)
+    ax2.set_title("Volume", color=text_color, fontsize=11, pad=8)
+
+    if len(x) == 0:
+        x_ticks = np.array([])
+    else:
+        x_ticks = x
+    ax2.set_xticks(x_ticks)
+    ax2.set_xticklabels([""] * len(x_ticks))
+    ax2.set_xlabel("Session spacing", color=muted_text, fontsize=10)
 
     if len(x) <= 1:
-        ax1.set_xlim(-0.02, 1.02)
+        x_left, x_right = -0.06, 1.06
     else:
-        ax1.set_xlim(x.min() - 0.02, x.max() + 0.02)
+        x_left, x_right = x.min() - 0.03, x.max() + 0.03
+    ax1.set_xlim(x_left, x_right)
+    ax2.set_xlim(x_left, x_right)
 
-    fig.tight_layout()
+    fig.suptitle(title, fontsize=14, color=text_color, y=0.98)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
     return fig
 
 
