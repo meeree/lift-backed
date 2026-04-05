@@ -317,10 +317,12 @@ def make_session_summary_plot(df: pd.DataFrame, months_back=None, title="Session
 
     ax1.plot(x, max_weight, color=weight_color, linewidth=1.9, alpha=0.9)
     ax1.bar(x, max_weight, width=bar_width, color=weight_fill, edgecolor=weight_color, linewidth=1.2, alpha=0.9)
+    ax1.set_ylim(0.8 * max_weight.min(), 1.1 * max_weight.max())
     ax1.set_ylabel("Max Weight", color=text_color, fontsize=11)
 
     ax2.bar(x, volume, width=bar_width, color=volume_fill, edgecolor=volume_color, linewidth=1.2, alpha=0.9)
     ax2.plot(x, volume, color=volume_color, linewidth=1.9, alpha=0.9)
+    ax2.set_ylim(0.8 * volume.min(), 1.1 * volume.max())
     ax2.set_ylabel("Volume", color=text_color, fontsize=11)
 
     if len(x) == 0:
