@@ -2,7 +2,7 @@ from io import BytesIO
 from flask_cors import CORS
 
 import matplotlib
-matplotlib.use("Agg")
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pandas as pd
 from flask import Flask, Response, render_template, request
@@ -12,52 +12,36 @@ app = Flask(__name__)
 CORS(app)
 
 
-@app.route("/")
+@app.route('/')
 def index():
-    return render_template("index.html")
+    return render_template('index.html')
 
 
 def infer_daily_pr_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    For each day, infer aggregate achievements from multiple entries.
-
-    Example:
-    - 1x3 @ 365
-    - 2x3 @ 385
-    - 1x4 @ 465
-
-    implies on that date:
-    - 4x3 @ 365
-    - 3x3 @ 385
-    - 1x4 @ 465
-
-    The plotting layer will then keep only the best weights for each sets x reps cell,
-    and the existing envelope logic will still fill easier cells.
-    """
     inferred_rows = []
 
-    for date_value, day_df in df.groupby("date", sort=True):
+    for date_value, day_df in df.groupby('date', sort=True):
         day_df = day_df.copy()
-        day_df["weight"] = pd.to_numeric(day_df["weight"], errors="coerce")
-        day_df["sets"] = pd.to_numeric(day_df["sets"], errors="coerce")
-        day_df["reps"] = pd.to_numeric(day_df["reps"], errors="coerce")
-        day_df = day_df.dropna(subset=["weight", "sets", "reps"])
+        day_df['weight'] = pd.to_numeric(day_df['weight'], errors='coerce')
+        day_df['sets'] = pd.to_numeric(day_df['sets'], errors='coerce')
+        day_df['reps'] = pd.to_numeric(day_df['reps'], errors='coerce')
+        day_df = day_df.dropna(subset=['weight', 'sets', 'reps'])
 
         if day_df.empty:
             continue
 
-        candidate_weights = sorted(day_df["weight"].unique())
-        max_reps = int(day_df["reps"].max())
+        candidate_weights = sorted(day_df['weight'].unique())
+        max_reps = int(day_df['reps'].max())
 
         for weight_threshold in candidate_weights:
-            qualifying_for_weight = day_df[day_df["weight"] >= weight_threshold]
+            qualifying_for_weight = day_df[day_df['weight'] >= weight_threshold]
             if qualifying_for_weight.empty:
                 continue
 
             for rep_threshold in range(1, max_reps + 1):
                 total_sets = int(
                     qualifying_for_weight.loc[
-                        qualifying_for_weight["reps"] >= rep_threshold, "sets"
+                        qualifying_for_weight['reps'] >= rep_threshold, 'sets'
                     ].sum()
                 )
 
@@ -66,71 +50,76 @@ def infer_daily_pr_rows(df: pd.DataFrame) -> pd.DataFrame:
 
                 inferred_rows.append(
                     {
-                        "date": date_value,
-                        "weight": float(weight_threshold),
-                        "sets": total_sets,
-                        "reps": rep_threshold,
+                        'date': date_value,
+                        'weight': float(weight_threshold),
+                        'sets': total_sets,
+                        'reps': rep_threshold,
                     }
                 )
 
     if not inferred_rows:
-        return pd.DataFrame(columns=["date", "weight", "sets", "reps"])
+        return pd.DataFrame(columns=['date', 'weight', 'sets', 'reps'])
 
     inferred_df = pd.DataFrame(inferred_rows)
     inferred_df = (
-        inferred_df.groupby(["date", "sets", "reps"], as_index=False)["weight"]
+        inferred_df.groupby(['date', 'sets', 'reps'], as_index=False)['weight']
         .max()
-        .sort_values(["date", "sets", "reps", "weight"])
+        .sort_values(['date', 'sets', 'reps', 'weight'])
     )
     return inferred_df
 
 
-def my_grid(df, vmin=None, vmax=None, increment=10, title="PR Bingo Chart"):
-    max_sets = max(10, int(df["sets"].max()))
-    max_reps = max(8, int(df["reps"].max()))
-    sets = np.arange(1, max_sets + 1)
-    reps = np.arange(1, max_reps + 1)
-    grid = np.stack(np.meshgrid(reps, sets))
-    vals = np.full(grid[0].shape, np.nan, dtype=float)
+def compute_normalized_session_times(dates: pd.Series) -> tuple[np.ndarray, np.ndarray]:
+    unique_dates = pd.Series(pd.to_datetime(pd.Series(dates).dropna().unique())).sort_values()
+    if unique_dates.empty:
+        return np.array([]), np.array([])
+
+    ordinals = unique_dates.map(pd.Timestamp.toordinal).astype(float).to_numpy()
+    if len(ordinals) == 1:
+        normalized = np.array([0.0])
+    else:
+        normalized = (ordinals - ordinals.min()) / (ordinals.max() - ordinals.min())
+
+    return unique_dates.to_numpy(), normalized
+
+
+def my_grid(df, vmin=None, vmax=None, increment=10, title='PR Bingo Chart'):
+    max_sets = max(10, int(df['sets'].max()))
+    max_reps = max(8, int(df['reps'].max()))
+    vals = np.full((max_sets, max_reps), np.nan, dtype=float)
 
     inferred_df = infer_daily_pr_rows(df)
     if inferred_df.empty:
-        inferred_df = df[["date", "weight", "sets", "reps"]].copy()
+        inferred_df = df[['date', 'weight', 'sets', 'reps']].copy()
 
     cell_best = (
-        inferred_df.groupby(["sets", "reps"], as_index=False)["weight"]
+        inferred_df.groupby(['sets', 'reps'], as_index=False)['weight']
         .max()
-        .sort_values(["sets", "reps"])
+        .sort_values(['sets', 'reps'])
     )
 
     for _, row in cell_best.iterrows():
-        s = int(row["sets"])
-        r = int(row["reps"])
-        if s >= 1 and r >= 1 and s <= vals.shape[0] and r <= vals.shape[1]:
-            vals[s - 1, r - 1] = float(row["weight"])
+        s = int(row['sets'])
+        r = int(row['reps'])
+        if 1 <= s <= vals.shape[0] and 1 <= r <= vals.shape[1]:
+            vals[s - 1, r - 1] = float(row['weight'])
+
+    marker_df = (
+        inferred_df.groupby(['sets', 'reps'], as_index=False)
+        .agg(weight=('weight', 'max'), date=('date', 'max'))
+        .sort_values(['date', 'sets', 'reps'])
+    )
+
+    unique_dates, normalized_times = compute_normalized_session_times(marker_df['date'])
+    time_lookup = {pd.Timestamp(d).normalize(): t for d, t in zip(unique_dates, normalized_times)}
 
     record = []
     times = []
-
-    def add_marker(s, r, v, dt):
-        record.append([s - 1, r - 1, v])
-        time = dt.timetuple().tm_yday + 365 * (dt.year - 2025)
-        times.append(time)
-
-    # Make markers follow the same inferred same-day PR logic as the heatmap.
-    # This avoids the visual mismatch where the grid shows inferred achievements
-    # but the dots still show only raw logged rows.
-    marker_df = (
-        inferred_df.groupby(["sets", "reps"], as_index=False)
-        .agg(weight=("weight", "max"), date=("date", "max"))
-        .sort_values(["date", "sets", "reps"])
-    )
     for _, row in marker_df.iterrows():
-        add_marker(int(row["sets"]), int(row["reps"]), float(row["weight"]), row["date"])
+        record.append([int(row['sets']) - 1, int(row['reps']) - 1, float(row['weight'])])
+        times.append(time_lookup.get(pd.Timestamp(row['date']).normalize(), 0.0))
 
     times = np.array(times, dtype=float)
-    if len(times) > 0 and times.max() > 0:
-        times = times / times.max()
 
     envelope = np.nan_to_num(vals.copy(), nan=0.0)
     for i in range(1, vals.shape[0] + 1):
@@ -149,13 +138,12 @@ def my_grid(df, vmin=None, vmax=None, increment=10, title="PR Bingo Chart"):
         vmin = auto_vmin
     if vmax is None:
         vmax = auto_vmax
-
     if vmax <= vmin:
         vmax = vmin + increment
 
     fig = plt.figure(figsize=(6, 5))
-    cmap = plt.get_cmap("tab20b").copy()
-    cmap.set_bad(color="black")
+    cmap = plt.get_cmap('tab20b').copy()
+    cmap.set_bad(color='black')
 
     clipped = envelope.copy()
     clipped[clipped > vmax] = np.nan
@@ -163,9 +151,9 @@ def my_grid(df, vmin=None, vmax=None, increment=10, title="PR Bingo Chart"):
 
     plt.imshow(
         clipped,
-        interpolation="none",
-        origin="lower",
-        aspect="auto",
+        interpolation='none',
+        origin='lower',
+        aspect='auto',
         cmap=cmap,
         vmin=vmin,
         vmax=vmax,
@@ -177,74 +165,140 @@ def my_grid(df, vmin=None, vmax=None, increment=10, title="PR Bingo Chart"):
 
     if len(record) > 0:
         record = np.array(record).T
-        plt.scatter(record[1], record[0], c=times, cmap="Wistia", marker="^", s=80)
+        plt.scatter(record[1], record[0], c=times, cmap='Wistia', marker='^', s=80)
 
-    plt.xlabel("Reps", fontsize=14)
-    plt.ylabel("Sets", fontsize=14)
+    plt.xlabel('Reps', fontsize=14)
+    plt.ylabel('Sets', fontsize=14)
     plt.title(title, fontsize=14)
     plt.tight_layout()
     return fig
 
 
-@app.route("/plot.png", methods=["POST"])
+def make_session_summary_plot(df: pd.DataFrame, title='Session Summary'):
+    daily = (
+        df.groupby('date', as_index=False)
+        .agg(
+            volume=('weight', lambda x: 0.0),
+            max_weight=('weight', 'max'),
+        )
+        .sort_values('date')
+    )
+    # Fill volume separately so we can use sets and reps too.
+    volume_by_day = (df['weight'] * df['sets'] * df['reps']).groupby(df['date']).sum()
+    daily['volume'] = daily['date'].map(volume_by_day).astype(float)
+
+    unique_dates, normalized_times = compute_normalized_session_times(daily['date'])
+    time_lookup = {pd.Timestamp(d).normalize(): t for d, t in zip(unique_dates, normalized_times)}
+    x = np.array([time_lookup[pd.Timestamp(d).normalize()] for d in daily['date']], dtype=float)
+
+    fig, ax1 = plt.subplots(figsize=(8, 3.8))
+    ax2 = ax1.twinx()
+
+    ax1.plot(x, daily['max_weight'].to_numpy(dtype=float), marker='o', linewidth=2)
+    ax2.plot(x, daily['volume'].to_numpy(dtype=float), marker='s', linewidth=2)
+
+    ax1.set_title(f'{title} Session Summary', fontsize=14)
+    ax1.set_ylabel('Max Weight', fontsize=12)
+    ax2.set_ylabel('Volume', fontsize=12)
+    ax1.set_xlabel('Session Day', fontsize=12)
+
+    ax1.set_xticks(x)
+    ax1.set_xticklabels([''] * len(x))
+
+    ax1.grid(True, axis='y', alpha=0.25)
+    ax1.set_xlim(-0.02, 1.02 if len(x) > 1 else 1.0)
+    fig.tight_layout()
+    return fig
+
+
+def parse_request_df():
+    data = request.get_json()
+
+    if not data or 'lifts' not in data:
+        return None, None, None, Response('Missing lift data.', status=400)
+
+    lifts = data['lifts']
+    if not lifts:
+        return None, None, None, Response('No lifts provided.', status=400)
+
+    controls = data.get('controls', {})
+    lift_name = data.get('lift_name', 'PR Bingo Chart')
+
+    vmin = controls.get('vmin')
+    vmax = controls.get('vmax')
+    increment = controls.get('increment', 10)
+
+    vmin = None if vmin in ('', None) else float(vmin)
+    vmax = None if vmax in ('', None) else float(vmax)
+    increment = 10 if increment in ('', None) else float(increment)
+
+    if increment <= 0:
+        return None, None, None, Response('Increment must be positive.', status=400)
+
+    df = pd.DataFrame(lifts)
+    required_cols = {'date', 'weight', 'sets', 'reps'}
+    if not required_cols.issubset(df.columns):
+        return None, None, None, Response('Lift data missing required fields.', status=400)
+
+    df['date'] = pd.to_datetime(df['date'], errors='coerce').dt.normalize()
+    df['weight'] = pd.to_numeric(df['weight'], errors='coerce')
+    df['sets'] = pd.to_numeric(df['sets'], errors='coerce')
+    df['reps'] = pd.to_numeric(df['reps'], errors='coerce')
+
+    df = df.dropna(subset=['date', 'weight', 'sets', 'reps']).copy()
+    df = df[(df['weight'] > 0) & (df['sets'] > 0) & (df['reps'] > 0)]
+
+    if df.empty:
+        return None, None, None, Response('No valid lift data after parsing.', status=400)
+
+    df['sets'] = df['sets'].astype(int)
+    df['reps'] = df['reps'].astype(int)
+    df = df.sort_values('date')
+
+    return df, lift_name, {'vmin': vmin, 'vmax': vmax, 'increment': increment}, None
+
+
+@app.route('/plot.png', methods=['POST'])
 def plot_png():
     try:
-        data = request.get_json()
+        df, lift_name, controls, error_response = parse_request_df()
+        if error_response is not None:
+            return error_response
 
-        if not data or "lifts" not in data:
-            return Response("Missing lift data.", status=400)
-
-        lifts = data["lifts"]
-        if not lifts:
-            return Response("No lifts provided.", status=400)
-
-        controls = data.get("controls", {})
-        lift_name = data.get("lift_name", "PR Bingo Chart")
-
-        vmin = controls.get("vmin")
-        vmax = controls.get("vmax")
-        increment = controls.get("increment", 10)
-
-        vmin = None if vmin in ("", None) else float(vmin)
-        vmax = None if vmax in ("", None) else float(vmax)
-        increment = 10 if increment in ("", None) else float(increment)
-
-        if increment <= 0:
-            return Response("Increment must be positive.", status=400)
-
-        df = pd.DataFrame(lifts)
-
-        required_cols = {"date", "weight", "sets", "reps"}
-        if not required_cols.issubset(df.columns):
-            return Response("Lift data missing required fields.", status=400)
-
-        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.normalize()
-        df["weight"] = pd.to_numeric(df["weight"], errors="coerce")
-        df["sets"] = pd.to_numeric(df["sets"], errors="coerce")
-        df["reps"] = pd.to_numeric(df["reps"], errors="coerce")
-
-        df = df.dropna(subset=["date", "weight", "sets", "reps"]).copy()
-        df = df[(df["weight"] > 0) & (df["sets"] > 0) & (df["reps"] > 0)]
-
-        if df.empty:
-            return Response("No valid lift data after parsing.", status=400)
-
-        df["sets"] = df["sets"].astype(int)
-        df["reps"] = df["reps"].astype(int)
-        df = df.sort_values("date")
-
-        fig = my_grid(df, vmin=vmin, vmax=vmax, increment=increment, title=lift_name)
+        fig = my_grid(
+            df,
+            vmin=controls['vmin'],
+            vmax=controls['vmax'],
+            increment=controls['increment'],
+            title=lift_name,
+        )
 
         buf = BytesIO()
-        fig.savefig(buf, format="png", dpi=150)
+        fig.savefig(buf, format='png', dpi=150)
         plt.close(fig)
         buf.seek(0)
-
-        return Response(buf.getvalue(), mimetype="image/png")
-
+        return Response(buf.getvalue(), mimetype='image/png')
     except Exception as e:
-        return Response(f"Error generating plot: {str(e)}", status=500)
+        return Response(f'Error generating plot: {str(e)}', status=500)
 
 
-if __name__ == "__main__":
+@app.route('/summary.png', methods=['POST'])
+def summary_png():
+    try:
+        df, lift_name, _, error_response = parse_request_df()
+        if error_response is not None:
+            return error_response
+
+        fig = make_session_summary_plot(df, title=lift_name)
+
+        buf = BytesIO()
+        fig.savefig(buf, format='png', dpi=150)
+        plt.close(fig)
+        buf.seek(0)
+        return Response(buf.getvalue(), mimetype='image/png')
+    except Exception as e:
+        return Response(f'Error generating summary plot: {str(e)}', status=500)
+
+
+if __name__ == '__main__':
     app.run(debug=True)
