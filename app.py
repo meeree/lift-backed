@@ -117,10 +117,13 @@ def my_grid(df, vmin=None, vmax=None, increment=10, title="PR Bingo Chart"):
         time = dt.timetuple().tm_yday + 365 * (dt.year - 2025)
         times.append(time)
 
+    # Make markers follow the same inferred same-day PR logic as the heatmap.
+    # This avoids the visual mismatch where the grid shows inferred achievements
+    # but the dots still show only raw logged rows.
     marker_df = (
-        df.groupby(["date", "sets", "reps"], as_index=False)["weight"]
-        .max()
-        .sort_values("date")
+        inferred_df.groupby(["sets", "reps"], as_index=False)
+        .agg(weight=("weight", "max"), date=("date", "max"))
+        .sort_values(["date", "sets", "reps"])
     )
     for _, row in marker_df.iterrows():
         add_marker(int(row["sets"]), int(row["reps"]), float(row["weight"]), row["date"])
