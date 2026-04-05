@@ -315,15 +315,13 @@ def make_session_summary_plot(df: pd.DataFrame, months_back=None, title="Session
         ax.grid(True, axis="y", color=grid_color, alpha=0.35, linewidth=0.8)
         ax.grid(False, axis="x")
 
-    ax1.fill_between(x, max_weight, 0, color=weight_fill, alpha=0.35, zorder=1)
-    ax1.plot(x, max_weight, color=weight_color, linewidth=2.8, marker="o", markersize=5.5, zorder=2)
-    ax1.set_ylabel("Weight", color=text_color, fontsize=11)
-    ax1.set_title("Max Weight", color=text_color, fontsize=11, pad=8)
+    ax2.plot(x, max_weight, color=weight_color, linewidth=1.9, alpha=0.9)
+    ax2.bar(x, max_weight, width=bar_width, color=weight_fill, edgecolor=weight_color, linewidth=1.2, alpha=0.9)
+    ax1.set_ylabel("Max Weight", color=text_color, fontsize=11)
 
     ax2.bar(x, volume, width=bar_width, color=volume_fill, edgecolor=volume_color, linewidth=1.2, alpha=0.9)
-    ax2.plot(x, volume, color=volume_color, linewidth=1.7, alpha=0.9)
+    ax2.plot(x, volume, color=volume_color, linewidth=1.9, alpha=0.9)
     ax2.set_ylabel("Volume", color=text_color, fontsize=11)
-    ax2.set_title("Volume", color=text_color, fontsize=11, pad=8)
 
     if len(x) == 0:
         x_ticks = np.array([])
@@ -331,7 +329,7 @@ def make_session_summary_plot(df: pd.DataFrame, months_back=None, title="Session
         x_ticks = x
     ax2.set_xticks(x_ticks)
     ax2.set_xticklabels([""] * len(x_ticks))
-    ax2.set_xlabel("Session spacing", color=muted_text, fontsize=10)
+    ax2.set_xlabel("Training Session", color=muted_text, fontsize=10)
 
     if len(x) <= 1:
         x_left, x_right = -0.06, 1.06
@@ -341,7 +339,7 @@ def make_session_summary_plot(df: pd.DataFrame, months_back=None, title="Session
     ax2.set_xlim(x_left, x_right)
 
     fig.suptitle(title, fontsize=14, color=text_color, y=0.98)
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.tight_layout()#rect=[0, 0, 1, 0.95])
     return fig
 
 
