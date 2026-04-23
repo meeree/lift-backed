@@ -346,7 +346,7 @@ def compute_metric_diffs(df: pd.DataFrame) -> dict:
 
     for metric_name in METRIC_OPTIONS:
         pred = compute_metric_prediction(envelope, fit_mask, metric_name)
-        diff = pred - envelope
+        diff = envelope - pred
         diff[~valid_mask] = np.nan
         diffs[metric_name] = diff
         if np.isfinite(diff).any():
@@ -365,41 +365,139 @@ def compute_metric_diffs(df: pd.DataFrame) -> dict:
     }
 
 
-def generate_session_recommendations(df: pd.DataFrame, top_k: int = 20) -> list[dict]:
+
+def _neighbors_8(i: int, j: int, rows: int, cols: int):
+    for di in (-1, 0, 1):
+        for dj in (-1, 0, 1):
+            if di == 0 and dj == 0:
+                continue
+            ni, nj = i + di, j + dj
+            if 0 <= ni < rows and 0 <= nj < cols:
+                yield ni, nj
+
+
+def _hill_climb_local_max(score: np.ndarray, start_i: int, start_j: int, valid_mask: np.ndarray):
+    i, j = start_i, start_j
+    rows, cols = score.shape
+    while True:
+        best_i, best_j = i, j
+        best_val = score[i, j]
+        for ni, nj in _neighbors_8(i, j, rows, cols):
+            if not valid_mask[ni, nj] or not np.isfinite(score[ni, nj]):
+                continue
+            if score[ni, nj] > best_val + 1e-9:
+                best_i, best_j = ni, nj
+                best_val = score[ni, nj]
+        if best_i == i and best_j == j:
+            return i, j
+        i, j = best_i, best_j
+
+
+def _plateau_impact(envelope: np.ndarray, i: int, j: int) -> int:
+    w = envelope[i, j]
+    impact = 0
+    for ii in range(i + 1):
+        for jj in range(j + 1):
+            if np.isfinite(envelope[ii, jj]) and abs(envelope[ii, jj] - w) < 1e-9:
+                impact += 1
+    return impact
+
+
+def _dedupe_ranked_candidates(candidates: list[dict], top_k: int, min_manhattan: int = 2) -> list[dict]:
+    chosen = []
+    for cand in candidates:
+        keep = True
+        for prev in chosen:
+            dist = abs(cand["sets"] - prev["sets"]) + abs(cand["reps"] - prev["reps"])
+            if dist < min_manhattan:
+                keep = False
+                break
+        if keep:
+            chosen.append(cand)
+        if len(chosen) >= top_k:
+            break
+    return chosen
+
+
+def generate_session_recommendations(df: pd.DataFrame, top_k: int = 10) -> dict:
     data = compute_metric_diffs(df)
     vals = data["vals"]
+    envelope = data["envelope"]
     valid_mask = data["valid_mask"]
     metric_names = list(METRIC_OPTIONS.keys())
 
-    aggregate = np.zeros_like(vals, dtype=float)
-    agreement = np.zeros_like(vals, dtype=float)
-
+    positive_diffs = []
     for metric_name in metric_names:
         diff = data["diffs"][metric_name]
-        positive = np.where(np.isfinite(diff), np.maximum(diff, 0.0), 0.0)
-        aggregate += positive
-        agreement += (positive > 0).astype(float)
+        positive_diffs.append(np.where(np.isfinite(diff), np.maximum(diff, 0.0), np.nan))
 
-    # reward agreement across models, but keep it modest
-    score = aggregate + 5.0 * np.maximum(agreement - 1.0, 0.0)
-    score[~valid_mask] = np.nan
+    stacked = np.stack(positive_diffs, axis=0)
+    mean_score = np.nanmean(stacked, axis=0)
+    mean_score[~valid_mask] = np.nan
 
-    rows = []
-    for i in range(score.shape[0]):
-        for j in range(score.shape[1]):
-            if not np.isfinite(score[i, j]):
+    rng = np.random.default_rng(0)
+    valid_coords = np.argwhere(valid_mask & np.isfinite(mean_score))
+    low_hanging_candidates = []
+
+    if len(valid_coords) > 0:
+        num_seeds = min(300, max(60, 8 * len(valid_coords)))
+        seed_indices = rng.integers(0, len(valid_coords), size=num_seeds)
+        seen = set()
+
+        for seed_idx in seed_indices:
+            si, sj = valid_coords[seed_idx]
+            li, lj = _hill_climb_local_max(mean_score, int(si), int(sj), valid_mask)
+            key = (li, lj)
+            if key in seen:
                 continue
-            rows.append(
+            seen.add(key)
+
+            current_weight = float(vals[li, lj]) if np.isfinite(vals[li, lj]) else None
+            low_hanging_candidates.append(
                 {
-                    "sets": int(i + 1),
-                    "reps": int(j + 1),
-                    "score": float(score[i, j]),
-                    "current_weight": float(vals[i, j]) if np.isfinite(vals[i, j]) else None,
+                    "sets": int(li + 1),
+                    "reps": int(lj + 1),
+                    "score": float(mean_score[li, lj]),
+                    "current_weight": current_weight,
                 }
             )
 
-    rows.sort(key=lambda x: (-x["score"], x["sets"], x["reps"]))
-    return rows[:top_k]
+    low_hanging_candidates.sort(key=lambda x: (-x["score"], x["sets"], x["reps"]))
+    low_hanging = _dedupe_ranked_candidates(low_hanging_candidates, top_k=top_k, min_manhattan=2)
+
+    impactful_candidates = []
+    rows, cols = mean_score.shape
+    for i in range(rows):
+        for j in range(cols):
+            if not valid_mask[i, j] or not np.isfinite(mean_score[i, j]):
+                continue
+            plateau_size = _plateau_impact(envelope, i, j)
+            impact_score = plateau_size * max(float(mean_score[i, j]), 0.0)
+            if impact_score <= 0:
+                continue
+
+            current_weight = float(vals[i, j]) if np.isfinite(vals[i, j]) else None
+            impactful_candidates.append(
+                {
+                    "sets": int(i + 1),
+                    "reps": int(j + 1),
+                    "score": float(impact_score),
+                    "mean_score": float(mean_score[i, j]),
+                    "plateau_size": int(plateau_size),
+                    "current_weight": current_weight,
+                }
+            )
+
+    impactful_candidates.sort(
+        key=lambda x: (-x["score"], -x["plateau_size"], -x["mean_score"], x["sets"], x["reps"])
+    )
+    impactful = _dedupe_ranked_candidates(impactful_candidates, top_k=top_k, min_manhattan=2)
+
+    return {
+        "low_hanging": low_hanging,
+        "most_impactful": impactful,
+        "mean_score_grid": mean_score.tolist(),
+    }
 
 
 def my_grid(df: pd.DataFrame, vmin=None, vmax=None, increment=10, title="PR Bingo Chart"):
@@ -502,7 +600,7 @@ def make_metric_diff_plot(df: pd.DataFrame, title: str = "Metric Over/Under"):
                 ax.text(j, i, text, ha="center", va="center", fontsize=8, color=text_color)
 
     cbar = fig.colorbar(im, ax=axes, shrink=0.92, pad=0.02)
-    cbar.set_label("Predicted - Envelope", rotation=90)
+    cbar.set_label("Envelope - Predicted", rotation=90)
     fig.suptitle(title, fontsize=14)
     return fig
 
@@ -723,6 +821,7 @@ def metric_png():
         return Response(f"Error generating metric plot: {str(e)}", status=500)
 
 
+
 @app.route("/recommendations", methods=["POST"])
 def recommendations():
     try:
@@ -730,23 +829,36 @@ def recommendations():
         if error_response is not None:
             return error_response
 
-        recs = generate_session_recommendations(df, top_k=20)
-        if not recs:
-            return {"text": "No recommendations available yet.", "recommendations": []}
+        rec_data = generate_session_recommendations(df, top_k=10)
+        low_hanging = rec_data["low_hanging"]
+        impactful = rec_data["most_impactful"]
 
-        lines = ["Recommended next sessions ranked:"]
-        for rec in recs:
+        if not low_hanging and not impactful:
+            return {"text": "No recommendations available yet.", "lift_name": lift_name}
+
+        lines = ["Low hanging fruit:"]
+        for rec in low_hanging:
             current_weight = rec.get("current_weight")
-            current_text = (
-                f", current {int(round(current_weight))}"
-                if current_weight is not None
-                else ""
-            )
+            current_text = f", current {int(round(current_weight))}" if current_weight is not None else ""
             lines.append(
                 f'{rec["sets"]}x{rec["reps"]} (score {int(round(rec["score"]))}{current_text})'
             )
 
-        return {"text": "\n".join(lines), "recommendations": recs, "lift_name": lift_name}
+        lines.append("")
+        lines.append("Most impactful:")
+        for rec in impactful:
+            current_weight = rec.get("current_weight")
+            current_text = f", current {int(round(current_weight))}" if current_weight is not None else ""
+            lines.append(
+                f'{rec["sets"]}x{rec["reps"]} (score {int(round(rec["score"]))}, area {rec["plateau_size"]}{current_text})'
+            )
+
+        return {
+            "text": "\n".join(lines),
+            "low_hanging": low_hanging,
+            "most_impactful": impactful,
+            "lift_name": lift_name,
+        }
     except Exception as e:
         return Response(f"Error generating recommendations: {str(e)}", status=500)
 
