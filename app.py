@@ -1,4 +1,3 @@
-
 from io import BytesIO
 
 from flask_cors import CORS
@@ -12,6 +11,12 @@ from flask import Flask, Response, render_template, request
 
 app = Flask(__name__)
 CORS(app)
+
+METRIC_OPTIONS = {
+    "log_linear_surface": "Frontier Log Surface",
+    "fatigue_exponential": "Fatigue Exponential",
+    "separable_log_surface": "Separable Log Surface",
+}
 
 
 @app.route("/")
@@ -72,13 +77,6 @@ def infer_daily_pr_rows(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_marker_points(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Marker points should include:
-    - raw logged entries
-    - same-day inferred PR combinations before the global envelope is applied
-
-    They should NOT include extra envelope-filled cells.
-    """
     marker_rows = []
 
     for date_value, day_df in df.groupby("date", sort=True):
@@ -91,7 +89,6 @@ def compute_marker_points(df: pd.DataFrame) -> pd.DataFrame:
         if day_df.empty:
             continue
 
-        # Raw logged points.
         for _, row in day_df.iterrows():
             marker_rows.append(
                 {
@@ -102,7 +99,6 @@ def compute_marker_points(df: pd.DataFrame) -> pd.DataFrame:
                 }
             )
 
-        # Same-day inferred PR combinations (pre-envelope only).
         combos = {}
         for _, row in day_df.iterrows():
             weight_threshold = float(row["weight"])
@@ -157,7 +153,7 @@ def compute_normalized_session_times(dates: pd.Series) -> tuple[np.ndarray, np.n
     return unique_dates.to_numpy(), normalized
 
 
-def my_grid(df: pd.DataFrame, vmin=None, vmax=None, increment=10, title="PR Bingo Chart"):
+def build_true_pr_and_envelope(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     max_sets = max(10, int(df["sets"].max()))
     max_reps = max(8, int(df["reps"].max()))
     vals = np.full((max_sets, max_reps), np.nan, dtype=float)
@@ -178,6 +174,149 @@ def my_grid(df: pd.DataFrame, vmin=None, vmax=None, increment=10, title="PR Bing
         if 1 <= s <= vals.shape[0] and 1 <= r <= vals.shape[1]:
             vals[s - 1, r - 1] = float(row["weight"])
 
+    envelope = np.nan_to_num(vals.copy(), nan=0.0)
+    for i in range(1, vals.shape[0] + 1):
+        for j in range(1, vals.shape[1] + 1):
+            envelope[:i, :j] = np.maximum(envelope[i - 1, j - 1], envelope[:i, :j])
+
+    return vals, envelope
+
+
+def frontier_mask_from_matrix(matrix: np.ndarray) -> np.ndarray:
+    observed = np.isfinite(matrix) & (matrix > 0)
+    frontier = observed.copy()
+    rows, cols = matrix.shape
+
+    for s in range(rows):
+        for r in range(cols):
+            if not observed[s, r]:
+                continue
+            w = matrix[s, r]
+            dominated = False
+            for s2 in range(s, rows):
+                for r2 in range(r, cols):
+                    if s2 == s and r2 == r:
+                        continue
+                    if observed[s2, r2] and matrix[s2, r2] >= w and (s2 > s or r2 > r):
+                        dominated = True
+                        break
+                if dominated:
+                    break
+            frontier[s, r] = not dominated
+
+    return frontier
+
+
+def _grid_sr(shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    rows, cols = shape
+    s = np.arange(1, rows + 1, dtype=float)[:, None]
+    r = np.arange(1, cols + 1, dtype=float)[None, :]
+    return np.broadcast_to(s, shape), np.broadcast_to(r, shape)
+
+
+def fit_log_linear_surface_from_envelope(envelope: np.ndarray) -> np.ndarray:
+    frontier = frontier_mask_from_matrix(envelope)
+    s_idx, r_idx = np.where(frontier)
+    s = s_idx.astype(float) + 1.0
+    r = r_idx.astype(float) + 1.0
+    y = envelope[frontier]
+
+    X = np.column_stack(
+        [
+            np.ones_like(s),
+            np.log(s),
+            np.log(r),
+            np.log(s) * np.log(r),
+        ]
+    )
+    y_log = np.log(np.clip(y, 1e-6, None))
+    ridge = 1e-3 * np.eye(X.shape[1])
+    beta = np.linalg.solve(X.T @ X + ridge, X.T @ y_log)
+
+    sg, rg = _grid_sr(envelope.shape)
+    Xg = np.stack(
+        [
+            np.ones_like(sg),
+            np.log(sg),
+            np.log(rg),
+            np.log(sg) * np.log(rg),
+        ],
+        axis=-1,
+    )
+    pred = np.exp(Xg @ beta)
+    return np.minimum(pred, envelope[0, 0])
+
+
+def fit_fatigue_exponential_from_envelope(envelope: np.ndarray) -> np.ndarray:
+    frontier = frontier_mask_from_matrix(envelope)
+    s_idx, r_idx = np.where(frontier)
+    s = s_idx.astype(float) + 1.0
+    r = r_idx.astype(float) + 1.0
+    y = envelope[frontier]
+
+    X = np.column_stack(
+        [
+            np.ones_like(s),
+            -(r - 1.0),
+            -(s - 1.0),
+            -((s - 1.0) * (r - 1.0)),
+        ]
+    )
+    y_log = np.log(np.clip(y, 1e-6, None))
+    ridge = 1e-3 * np.eye(X.shape[1])
+    beta = np.linalg.solve(X.T @ X + ridge, X.T @ y_log)
+
+    sg, rg = _grid_sr(envelope.shape)
+    Xg = np.stack(
+        [
+            np.ones_like(sg),
+            -(rg - 1.0),
+            -(sg - 1.0),
+            -((sg - 1.0) * (rg - 1.0)),
+        ],
+        axis=-1,
+    )
+    pred = np.exp(Xg @ beta)
+    return np.minimum(pred, envelope[0, 0])
+
+
+def fit_separable_log_surface_from_envelope(envelope: np.ndarray) -> np.ndarray:
+    y_log = np.log(np.clip(envelope, 1e-6, None))
+    row_bias = y_log.mean(axis=1, keepdims=True) - y_log.mean()
+    col_bias = y_log.mean(axis=0, keepdims=True) - y_log.mean()
+    pred_log = y_log.mean() + row_bias + col_bias
+    pred = np.exp(pred_log)
+    return np.minimum(pred, envelope[0, 0])
+
+
+def compute_metric_prediction(envelope: np.ndarray, metric_name: str) -> np.ndarray:
+    if metric_name == "log_linear_surface":
+        pred = fit_log_linear_surface_from_envelope(envelope)
+    elif metric_name == "fatigue_exponential":
+        pred = fit_fatigue_exponential_from_envelope(envelope)
+    elif metric_name == "separable_log_surface":
+        pred = fit_separable_log_surface_from_envelope(envelope)
+    else:
+        raise ValueError(f"Unknown metric: {metric_name}")
+
+    pred = np.minimum.accumulate(pred, axis=0)
+    pred = np.minimum.accumulate(pred, axis=1)
+    return np.clip(pred, 0.0, None)
+
+
+def auto_color_range(matrix: np.ndarray, increment: float) -> tuple[float, float]:
+    finite_vals = matrix[np.isfinite(matrix)]
+    positive_vals = finite_vals[finite_vals > 0]
+    if positive_vals.size == 0:
+        auto_vmin, auto_vmax = 0.0, 100.0
+    else:
+        auto_vmin = float(np.floor(positive_vals.min() / increment) * increment)
+        auto_vmax = float(np.ceil(positive_vals.max() / increment) * increment)
+    return auto_vmin, auto_vmax
+
+
+def my_grid(df: pd.DataFrame, vmin=None, vmax=None, increment=10, title="PR Bingo Chart"):
+    vals, envelope = build_true_pr_and_envelope(df)
     marker_df = compute_marker_points(df)
 
     unique_dates, normalized_times = compute_normalized_session_times(marker_df["date"])
@@ -194,18 +333,7 @@ def my_grid(df: pd.DataFrame, vmin=None, vmax=None, increment=10, title="PR Bing
 
     times = np.array(times, dtype=float)
 
-    envelope = np.nan_to_num(vals.copy(), nan=0.0)
-    for i in range(1, vals.shape[0] + 1):
-        for j in range(1, vals.shape[1] + 1):
-            envelope[:i, :j] = np.maximum(envelope[i - 1, j - 1], envelope[:i, :j])
-
-    finite_vals = envelope[np.isfinite(envelope)]
-    positive_vals = finite_vals[finite_vals > 0]
-    if positive_vals.size == 0:
-        auto_vmin, auto_vmax = 0, 100
-    else:
-        auto_vmin = int(np.floor(positive_vals.min() / increment) * increment)
-        auto_vmax = int(np.ceil(positive_vals.max() / increment) * increment)
+    auto_vmin, auto_vmax = auto_color_range(envelope, increment)
 
     if vmin is None:
         vmin = auto_vmin
@@ -243,6 +371,58 @@ def my_grid(df: pd.DataFrame, vmin=None, vmax=None, increment=10, title="PR Bing
     plt.xlabel("Reps", fontsize=14)
     plt.ylabel("Sets", fontsize=14)
     plt.title(title, fontsize=14)
+    plt.tight_layout()
+    return fig
+
+
+def make_metric_diff_plot(
+    df: pd.DataFrame,
+    metric_name: str,
+    title: str = "Metric Over/Under vs Envelope",
+):
+    _, envelope = build_true_pr_and_envelope(df)
+    pred = compute_metric_prediction(envelope, metric_name)
+    diff = pred - envelope
+
+    max_abs = float(np.nanmax(np.abs(diff))) if diff.size > 0 else 0.0
+    if max_abs <= 0:
+        max_abs = 10.0
+
+    fig = plt.figure(figsize=(6.5, 5.2))
+    cmap = plt.get_cmap("coolwarm")
+
+    plt.imshow(
+        diff,
+        interpolation="none",
+        origin="lower",
+        aspect="auto",
+        cmap=cmap,
+        vmin=-max_abs,
+        vmax=max_abs,
+    )
+
+    plt.yticks(np.arange(0, diff.shape[0]), np.arange(1, diff.shape[0] + 1))
+    plt.xticks(np.arange(0, diff.shape[1]), np.arange(1, diff.shape[1] + 1))
+    cbar = plt.colorbar()
+    cbar.set_label("Predicted - Envelope", rotation=90)
+
+    frontier = frontier_mask_from_matrix(envelope)
+    frontier_rows, frontier_cols = np.where(frontier)
+    if len(frontier_rows) > 0:
+        plt.scatter(frontier_cols, frontier_rows, facecolors="none", edgecolors="black", s=90, linewidths=1.4)
+
+    rows, cols = diff.shape
+    for i in range(rows):
+        for j in range(cols):
+            value = diff[i, j]
+            text = f"{int(np.rint(value))}"
+            text_color = "black" if abs(value) < 0.55 * max_abs else "white"
+            plt.text(j, i, text, ha="center", va="center", fontsize=8, color=text_color)
+
+    pretty_name = METRIC_OPTIONS.get(metric_name, metric_name)
+    plt.xlabel("Reps", fontsize=13)
+    plt.ylabel("Sets", fontsize=13)
+    plt.title(f"{title}: {pretty_name}", fontsize=13)
     plt.tight_layout()
     return fig
 
@@ -315,20 +495,20 @@ def make_session_summary_plot(df: pd.DataFrame, months_back=None, title="Session
         ax.grid(True, axis="y", color=grid_color, alpha=0.35, linewidth=0.8)
         ax.grid(False, axis="x")
 
-    ax1.plot(x, max_weight, color=weight_color, linewidth=1.9, alpha=0.9)
-    ax1.bar(x, max_weight, width=bar_width, color=weight_fill, edgecolor=weight_color, linewidth=1.2, alpha=0.9)
-    ax1.set_ylim(0.8 * max_weight.min(), 1.1 * max_weight.max())
-    ax1.set_ylabel("Max Weight", color=text_color, fontsize=11)
+    if len(max_weight) > 0:
+        ax1.plot(x, max_weight, color=weight_color, linewidth=1.9, alpha=0.9)
+        ax1.bar(x, max_weight, width=bar_width, color=weight_fill, edgecolor=weight_color, linewidth=1.2, alpha=0.9)
+        ax1.set_ylim(0.8 * max_weight.min(), 1.1 * max_weight.max())
 
-    ax2.bar(x, volume, width=bar_width, color=volume_fill, edgecolor=volume_color, linewidth=1.2, alpha=0.9)
-    ax2.plot(x, volume, color=volume_color, linewidth=1.9, alpha=0.9)
-    ax2.set_ylim(0.8 * volume.min(), 1.1 * volume.max())
+    if len(volume) > 0:
+        ax2.bar(x, volume, width=bar_width, color=volume_fill, edgecolor=volume_color, linewidth=1.2, alpha=0.9)
+        ax2.plot(x, volume, color=volume_color, linewidth=1.9, alpha=0.9)
+        ax2.set_ylim(0.8 * volume.min(), 1.1 * volume.max())
+
+    ax1.set_ylabel("Max Weight", color=text_color, fontsize=11)
     ax2.set_ylabel("Volume", color=text_color, fontsize=11)
 
-    if len(x) == 0:
-        x_ticks = np.array([])
-    else:
-        x_ticks = x
+    x_ticks = x if len(x) > 0 else np.array([])
     ax2.set_xticks(x_ticks)
     ax2.set_xticklabels([""] * len(x_ticks))
     ax2.set_xlabel("Training Session", color=muted_text, fontsize=10)
@@ -341,7 +521,7 @@ def make_session_summary_plot(df: pd.DataFrame, months_back=None, title="Session
     ax2.set_xlim(x_left, x_right)
 
     fig.suptitle(title, fontsize=14, color=text_color, y=0.98)
-    fig.tight_layout()#rect=[0, 0, 1, 0.95])
+    fig.tight_layout()
     return fig
 
 
@@ -362,6 +542,7 @@ def parse_request_df():
     vmax = controls.get("vmax")
     increment = controls.get("increment", 10)
     summary_months_back = controls.get("summary_months_back")
+    metric_name = controls.get("metric_name", "log_linear_surface")
 
     vmin = None if vmin in ("", None) else float(vmin)
     vmax = None if vmax in ("", None) else float(vmax)
@@ -370,6 +551,9 @@ def parse_request_df():
 
     if increment <= 0:
         return None, None, None, None, Response("Increment must be positive.", status=400)
+
+    if metric_name not in METRIC_OPTIONS:
+        return None, None, None, None, Response("Unknown metric selected.", status=400)
 
     df = pd.DataFrame(lifts)
     required_cols = {"date", "weight", "sets", "reps"}
@@ -396,6 +580,7 @@ def parse_request_df():
         "vmax": vmax,
         "increment": increment,
         "summary_months_back": summary_months_back,
+        "metric_name": metric_name,
     }
     return df, lift_name, controls_out, data, None
 
@@ -444,6 +629,28 @@ def summary_png():
         return Response(buf.getvalue(), mimetype="image/png")
     except Exception as e:
         return Response(f"Error generating summary plot: {str(e)}", status=500)
+
+
+@app.route("/metric.png", methods=["POST"])
+def metric_png():
+    try:
+        df, lift_name, controls, _, error_response = parse_request_df()
+        if error_response is not None:
+            return error_response
+
+        fig = make_metric_diff_plot(
+            df,
+            metric_name=controls["metric_name"],
+            title=f"{lift_name} Over/Under",
+        )
+
+        buf = BytesIO()
+        fig.savefig(buf, format="png", dpi=150)
+        plt.close(fig)
+        buf.seek(0)
+        return Response(buf.getvalue(), mimetype="image/png")
+    except Exception as e:
+        return Response(f"Error generating metric plot: {str(e)}", status=500)
 
 
 if __name__ == "__main__":
