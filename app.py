@@ -182,6 +182,17 @@ def build_true_pr_and_envelope(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray
     return vals, envelope
 
 
+def observed_envelope_mask(vals: np.ndarray) -> np.ndarray:
+    vals = np.asarray(vals, dtype=float)
+    rows, cols = vals.shape
+    mask = np.zeros_like(vals, dtype=bool)
+    for i in range(rows):
+        for j in range(cols):
+            sub = vals[i:, j:]
+            mask[i, j] = np.isfinite(sub).any()
+    return mask
+
+
 def frontier_mask_from_matrix(matrix: np.ndarray) -> np.ndarray:
     observed = np.isfinite(matrix) & (matrix > 0)
     frontier = observed.copy()
@@ -214,12 +225,11 @@ def _grid_sr(shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
     return np.broadcast_to(s, shape), np.broadcast_to(r, shape)
 
 
-def fit_log_linear_surface_from_envelope(envelope: np.ndarray) -> np.ndarray:
-    frontier = frontier_mask_from_matrix(envelope)
-    s_idx, r_idx = np.where(frontier)
+def fit_log_linear_surface_from_envelope(envelope: np.ndarray, fit_mask: np.ndarray) -> np.ndarray:
+    s_idx, r_idx = np.where(fit_mask)
     s = s_idx.astype(float) + 1.0
     r = r_idx.astype(float) + 1.0
-    y = envelope[frontier]
+    y = envelope[fit_mask]
 
     X = np.column_stack(
         [
@@ -247,12 +257,11 @@ def fit_log_linear_surface_from_envelope(envelope: np.ndarray) -> np.ndarray:
     return np.minimum(pred, envelope[0, 0])
 
 
-def fit_fatigue_exponential_from_envelope(envelope: np.ndarray) -> np.ndarray:
-    frontier = frontier_mask_from_matrix(envelope)
-    s_idx, r_idx = np.where(frontier)
+def fit_fatigue_exponential_from_envelope(envelope: np.ndarray, fit_mask: np.ndarray) -> np.ndarray:
+    s_idx, r_idx = np.where(fit_mask)
     s = s_idx.astype(float) + 1.0
     r = r_idx.astype(float) + 1.0
-    y = envelope[frontier]
+    y = envelope[fit_mask]
 
     X = np.column_stack(
         [
@@ -280,22 +289,34 @@ def fit_fatigue_exponential_from_envelope(envelope: np.ndarray) -> np.ndarray:
     return np.minimum(pred, envelope[0, 0])
 
 
-def fit_separable_log_surface_from_envelope(envelope: np.ndarray) -> np.ndarray:
-    y_log = np.log(np.clip(envelope, 1e-6, None))
-    row_bias = y_log.mean(axis=1, keepdims=True) - y_log.mean()
-    col_bias = y_log.mean(axis=0, keepdims=True) - y_log.mean()
-    pred_log = y_log.mean() + row_bias + col_bias
+def fit_separable_log_surface_from_envelope(envelope: np.ndarray, fit_mask: np.ndarray) -> np.ndarray:
+    y_log = np.log(np.clip(envelope[fit_mask], 1e-6, None))
+    row_ids, col_ids = np.where(fit_mask)
+
+    n_rows, n_cols = envelope.shape
+    row_means = np.zeros(n_rows, dtype=float)
+    col_means = np.zeros(n_cols, dtype=float)
+
+    global_mean = y_log.mean()
+    for i in range(n_rows):
+        vals = y_log[row_ids == i]
+        row_means[i] = vals.mean() if len(vals) > 0 else global_mean
+    for j in range(n_cols):
+        vals = y_log[col_ids == j]
+        col_means[j] = vals.mean() if len(vals) > 0 else global_mean
+
+    pred_log = global_mean + (row_means[:, None] - global_mean) + (col_means[None, :] - global_mean)
     pred = np.exp(pred_log)
     return np.minimum(pred, envelope[0, 0])
 
 
-def compute_metric_prediction(envelope: np.ndarray, metric_name: str) -> np.ndarray:
+def compute_metric_prediction(envelope: np.ndarray, fit_mask: np.ndarray, metric_name: str) -> np.ndarray:
     if metric_name == "log_linear_surface":
-        pred = fit_log_linear_surface_from_envelope(envelope)
+        pred = fit_log_linear_surface_from_envelope(envelope, fit_mask)
     elif metric_name == "fatigue_exponential":
-        pred = fit_fatigue_exponential_from_envelope(envelope)
+        pred = fit_fatigue_exponential_from_envelope(envelope, fit_mask)
     elif metric_name == "separable_log_surface":
-        pred = fit_separable_log_surface_from_envelope(envelope)
+        pred = fit_separable_log_surface_from_envelope(envelope, fit_mask)
     else:
         raise ValueError(f"Unknown metric: {metric_name}")
 
@@ -375,55 +396,59 @@ def my_grid(df: pd.DataFrame, vmin=None, vmax=None, increment=10, title="PR Bing
     return fig
 
 
-def make_metric_diff_plot(
-    df: pd.DataFrame,
-    metric_name: str,
-    title: str = "Metric Over/Under vs Envelope",
-):
-    _, envelope = build_true_pr_and_envelope(df)
-    pred = compute_metric_prediction(envelope, metric_name)
-    diff = pred - envelope
+def make_metric_diff_plot(df: pd.DataFrame, title: str = "Metric Over/Under"):
+    vals, envelope = build_true_pr_and_envelope(df)
+    fit_mask = frontier_mask_from_matrix(envelope)
+    valid_mask = observed_envelope_mask(vals)
 
-    max_abs = float(np.nanmax(np.abs(diff))) if diff.size > 0 else 0.0
+    metric_names = list(METRIC_OPTIONS.keys())
+    diffs = []
+    max_abs = 0.0
+    for metric_name in metric_names:
+        pred = compute_metric_prediction(envelope, fit_mask, metric_name)
+        diff = pred - envelope
+        diff[~valid_mask] = np.nan
+        diffs.append(diff)
+        if np.isfinite(diff).any():
+            max_abs = max(max_abs, float(np.nanmax(np.abs(diff))))
+
     if max_abs <= 0:
         max_abs = 10.0
 
-    fig = plt.figure(figsize=(6.5, 5.2))
-    cmap = plt.get_cmap("coolwarm")
+    fig, axes = plt.subplots(1, 3, figsize=(15.2, 4.9), constrained_layout=True)
+    cmap = plt.get_cmap("coolwarm").copy()
+    cmap.set_bad(color="#f2f2f2")
 
-    plt.imshow(
-        diff,
-        interpolation="none",
-        origin="lower",
-        aspect="auto",
-        cmap=cmap,
-        vmin=-max_abs,
-        vmax=max_abs,
-    )
+    for ax, metric_name, diff in zip(axes, metric_names, diffs):
+        im = ax.imshow(
+            diff,
+            interpolation="none",
+            origin="lower",
+            aspect="auto",
+            cmap=cmap,
+            vmin=-max_abs,
+            vmax=max_abs,
+        )
+        ax.set_xticks(np.arange(0, diff.shape[1]))
+        ax.set_xticklabels(np.arange(1, diff.shape[1] + 1))
+        ax.set_yticks(np.arange(0, diff.shape[0]))
+        ax.set_yticklabels(np.arange(1, diff.shape[0] + 1))
+        ax.set_xlabel("Reps", fontsize=11)
+        ax.set_ylabel("Sets", fontsize=11)
+        ax.set_title(METRIC_OPTIONS[metric_name], fontsize=12)
 
-    plt.yticks(np.arange(0, diff.shape[0]), np.arange(1, diff.shape[0] + 1))
-    plt.xticks(np.arange(0, diff.shape[1]), np.arange(1, diff.shape[1] + 1))
-    cbar = plt.colorbar()
+        for i in range(diff.shape[0]):
+            for j in range(diff.shape[1]):
+                value = diff[i, j]
+                if not np.isfinite(value):
+                    continue
+                text = f"{int(np.rint(value))}"
+                text_color = "black" if abs(value) < 0.55 * max_abs else "white"
+                ax.text(j, i, text, ha="center", va="center", fontsize=8, color=text_color)
+
+    cbar = fig.colorbar(im, ax=axes, shrink=0.92, pad=0.02)
     cbar.set_label("Predicted - Envelope", rotation=90)
-
-    frontier = frontier_mask_from_matrix(envelope)
-    frontier_rows, frontier_cols = np.where(frontier)
-    if len(frontier_rows) > 0:
-        plt.scatter(frontier_cols, frontier_rows, facecolors="none", edgecolors="black", s=90, linewidths=1.4)
-
-    rows, cols = diff.shape
-    for i in range(rows):
-        for j in range(cols):
-            value = diff[i, j]
-            text = f"{int(np.rint(value))}"
-            text_color = "black" if abs(value) < 0.55 * max_abs else "white"
-            plt.text(j, i, text, ha="center", va="center", fontsize=8, color=text_color)
-
-    pretty_name = METRIC_OPTIONS.get(metric_name, metric_name)
-    plt.xlabel("Reps", fontsize=13)
-    plt.ylabel("Sets", fontsize=13)
-    plt.title(f"{title}: {pretty_name}", fontsize=13)
-    plt.tight_layout()
+    fig.suptitle(title, fontsize=14)
     return fig
 
 
@@ -542,7 +567,6 @@ def parse_request_df():
     vmax = controls.get("vmax")
     increment = controls.get("increment", 10)
     summary_months_back = controls.get("summary_months_back")
-    metric_name = controls.get("metric_name", "log_linear_surface")
 
     vmin = None if vmin in ("", None) else float(vmin)
     vmax = None if vmax in ("", None) else float(vmax)
@@ -551,9 +575,6 @@ def parse_request_df():
 
     if increment <= 0:
         return None, None, None, None, Response("Increment must be positive.", status=400)
-
-    if metric_name not in METRIC_OPTIONS:
-        return None, None, None, None, Response("Unknown metric selected.", status=400)
 
     df = pd.DataFrame(lifts)
     required_cols = {"date", "weight", "sets", "reps"}
@@ -580,7 +601,6 @@ def parse_request_df():
         "vmax": vmax,
         "increment": increment,
         "summary_months_back": summary_months_back,
-        "metric_name": metric_name,
     }
     return df, lift_name, controls_out, data, None
 
@@ -638,11 +658,7 @@ def metric_png():
         if error_response is not None:
             return error_response
 
-        fig = make_metric_diff_plot(
-            df,
-            metric_name=controls["metric_name"],
-            title=f"{lift_name} Over/Under",
-        )
+        fig = make_metric_diff_plot(df, title=f"{lift_name} Over/Under")
 
         buf = BytesIO()
         fig.savefig(buf, format="png", dpi=150)
