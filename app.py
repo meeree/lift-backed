@@ -336,6 +336,72 @@ def auto_color_range(matrix: np.ndarray, increment: float) -> tuple[float, float
     return auto_vmin, auto_vmax
 
 
+def compute_metric_diffs(df: pd.DataFrame) -> dict:
+    vals, envelope = build_true_pr_and_envelope(df)
+    fit_mask = frontier_mask_from_matrix(envelope)
+    valid_mask = observed_envelope_mask(vals)
+
+    diffs = {}
+    max_abs = 0.0
+
+    for metric_name in METRIC_OPTIONS:
+        pred = compute_metric_prediction(envelope, fit_mask, metric_name)
+        diff = envelope - pred
+        diff[~valid_mask] = np.nan
+        diffs[metric_name] = diff
+        if np.isfinite(diff).any():
+            max_abs = max(max_abs, float(np.nanmax(np.abs(diff))))
+
+    if max_abs <= 0:
+        max_abs = 10.0
+
+    return {
+        "vals": vals,
+        "envelope": envelope,
+        "fit_mask": fit_mask,
+        "valid_mask": valid_mask,
+        "diffs": diffs,
+        "max_abs": max_abs,
+    }
+
+
+def generate_session_recommendations(df: pd.DataFrame, top_k: int = 8) -> list[dict]:
+    data = compute_metric_diffs(df)
+    vals = data["vals"]
+    valid_mask = data["valid_mask"]
+    metric_names = list(METRIC_OPTIONS.keys())
+
+    aggregate = np.zeros_like(vals, dtype=float)
+    agreement = np.zeros_like(vals, dtype=float)
+
+    for metric_name in metric_names:
+        diff = data["diffs"][metric_name]
+        positive = np.where(np.isfinite(diff), np.maximum(diff, 0.0), 0.0)
+        aggregate += positive
+        agreement += (positive > 0).astype(float)
+
+    # reward agreement across models, but keep it modest
+    score = aggregate + 5.0 * np.maximum(agreement - 1.0, 0.0)
+    score[~valid_mask] = np.nan
+
+    rows = []
+    for i in range(score.shape[0]):
+        for j in range(score.shape[1]):
+            if not np.isfinite(score[i, j]):
+                continue
+            rows.append(
+                {
+                    "sets": int(i + 1),
+                    "reps": int(j + 1),
+                    "score": float(score[i, j]),
+                    "current_weight": float(vals[i, j]) if np.isfinite(vals[i, j]) else None,
+                }
+            )
+
+    rows.sort(key=lambda x: (-x["score"], x["sets"], x["reps"]))
+    return rows[:top_k]
+
+
 def my_grid(df: pd.DataFrame, vmin=None, vmax=None, increment=10, title="PR Bingo Chart"):
     vals, envelope = build_true_pr_and_envelope(df)
     marker_df = compute_marker_points(df)
