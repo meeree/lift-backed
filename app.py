@@ -365,7 +365,7 @@ def compute_metric_diffs(df: pd.DataFrame) -> dict:
     }
 
 
-def generate_session_recommendations(df: pd.DataFrame, top_k: int = 8) -> list[dict]:
+def generate_session_recommendations(df: pd.DataFrame, top_k: int = 20) -> list[dict]:
     data = compute_metric_diffs(df)
     vals = data["vals"]
     valid_mask = data["valid_mask"]
@@ -730,7 +730,7 @@ def recommendations():
         if error_response is not None:
             return error_response
 
-        recs = generate_session_recommendations(df, top_k=8)
+        recs = generate_session_recommendations(df, top_k=20)
         if not recs:
             return {"text": "No recommendations available yet.", "recommendations": []}
 
