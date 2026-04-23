@@ -736,8 +736,14 @@ def recommendations():
 
         lines = ["Recommended next sessions ranked:"]
         for rec in recs:
+            current_weight = rec.get("current_weight")
+            current_text = (
+                f", current {int(round(current_weight))}"
+                if current_weight is not None
+                else ""
+            )
             lines.append(
-                f'{rec["sets"]}x{rec["reps"]} (score {int(round(rec["score"]))}, current {int(round(rec["current_weight"]))})'
+                f'{rec["sets"]}x{rec["reps"]} (score {int(round(rec["score"]))}{current_text})'
             )
 
         return {"text": "\n".join(lines), "recommendations": recs, "lift_name": lift_name}
