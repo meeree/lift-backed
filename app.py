@@ -396,24 +396,13 @@ def my_grid(df: pd.DataFrame, vmin=None, vmax=None, increment=10, title="PR Bing
     return fig
 
 
+
+
 def make_metric_diff_plot(df: pd.DataFrame, title: str = "Metric Over/Under"):
-    vals, envelope = build_true_pr_and_envelope(df)
-    fit_mask = frontier_mask_from_matrix(envelope)
-    valid_mask = observed_envelope_mask(vals)
-
+    data = compute_metric_diffs(df)
     metric_names = list(METRIC_OPTIONS.keys())
-    diffs = []
-    max_abs = 0.0
-    for metric_name in metric_names:
-        pred = compute_metric_prediction(envelope, fit_mask, metric_name)
-        diff = pred - envelope
-        diff[~valid_mask] = np.nan
-        diffs.append(diff)
-        if np.isfinite(diff).any():
-            max_abs = max(max_abs, float(np.nanmax(np.abs(diff))))
-
-    if max_abs <= 0:
-        max_abs = 10.0
+    diffs = [data["diffs"][metric_name] for metric_name in metric_names]
+    max_abs = data["max_abs"]
 
     fig, axes = plt.subplots(1, 3, figsize=(15.2, 4.9), constrained_layout=True)
     cmap = plt.get_cmap("coolwarm").copy()
@@ -447,10 +436,9 @@ def make_metric_diff_plot(df: pd.DataFrame, title: str = "Metric Over/Under"):
                 ax.text(j, i, text, ha="center", va="center", fontsize=8, color=text_color)
 
     cbar = fig.colorbar(im, ax=axes, shrink=0.92, pad=0.02)
-    cbar.set_label("Predicted - Envelope", rotation=90)
+    cbar.set_label("Envelope - Predicted", rotation=90)
     fig.suptitle(title, fontsize=14)
     return fig
-
 
 def filter_df_by_months_back(df: pd.DataFrame, months_back) -> pd.DataFrame:
     if months_back in (None, "", 0):
@@ -667,6 +655,28 @@ def metric_png():
         return Response(buf.getvalue(), mimetype="image/png")
     except Exception as e:
         return Response(f"Error generating metric plot: {str(e)}", status=500)
+
+
+@app.route("/recommendations", methods=["POST"])
+def recommendations():
+    try:
+        df, lift_name, controls, _, error_response = parse_request_df()
+        if error_response is not None:
+            return error_response
+
+        recs = generate_session_recommendations(df, top_k=8)
+        if not recs:
+            return {"text": "No recommendations available yet.", "recommendations": []}
+
+        lines = ["Recommended next sessions ranked:"]
+        for rec in recs:
+            lines.append(
+                f'{rec["sets"]}x{rec["reps"]} (score {int(round(rec["score"]))}, current {int(round(rec["current_weight"]))})'
+            )
+
+        return {"text": "\n".join(lines), "recommendations": recs, "lift_name": lift_name}
+    except Exception as e:
+        return Response(f"Error generating recommendations: {str(e)}", status=500)
 
 
 if __name__ == "__main__":
