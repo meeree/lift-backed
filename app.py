@@ -346,7 +346,7 @@ def compute_metric_diffs(df: pd.DataFrame) -> dict:
 
     for metric_name in METRIC_OPTIONS:
         pred = compute_metric_prediction(envelope, fit_mask, metric_name)
-        diff = envelope - pred
+        diff = pred - envelope
         diff[~valid_mask] = np.nan
         diffs[metric_name] = diff
         if np.isfinite(diff).any():
@@ -600,7 +600,7 @@ def make_metric_diff_plot(df: pd.DataFrame, title: str = "Metric Over/Under"):
                 ax.text(j, i, text, ha="center", va="center", fontsize=8, color=text_color)
 
     cbar = fig.colorbar(im, ax=axes, shrink=0.92, pad=0.02)
-    cbar.set_label("Envelope - Predicted", rotation=90)
+    cbar.set_label("Predicted - Envelope", rotation=90)
     fig.suptitle(title, fontsize=14)
     return fig
 
