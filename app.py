@@ -153,6 +153,51 @@ def compute_normalized_session_times(dates: pd.Series) -> tuple[np.ndarray, np.n
     return unique_dates.to_numpy(), normalized
 
 
+
+def compute_weekly_tick_positions(dates: pd.Series) -> tuple[np.ndarray, list[str]]:
+    parsed = pd.to_datetime(pd.Series(dates).dropna()).dt.normalize()
+    if parsed.empty:
+        return np.array([]), []
+
+    start = parsed.min()
+    end = parsed.max()
+    if start == end:
+        return np.array([0.0]), [start.strftime("%b %-d")]
+
+    start_week = start - pd.Timedelta(days=(start.weekday() + 1) % 7)
+    week_dates = pd.date_range(start=start_week, end=end + pd.Timedelta(days=6), freq="7D")
+    week_dates = week_dates[(week_dates >= start) & (week_dates <= end)]
+    if len(week_dates) == 0:
+        week_dates = pd.DatetimeIndex([start, end])
+
+    start_ord = float(start.toordinal())
+    span = float(end.toordinal() - start.toordinal())
+    x = np.array([(float(d.toordinal()) - start_ord) / span for d in week_dates], dtype=float)
+    labels = [d.strftime("%b %-d") for d in week_dates]
+    return x, labels
+
+
+def compute_continuous_bar_width(x: np.ndarray, default_width: float = 0.035) -> float:
+    x = np.asarray(x, dtype=float)
+    if len(x) <= 1:
+        return default_width
+    diffs = np.diff(np.sort(np.unique(x)))
+    diffs = diffs[diffs > 0]
+    if len(diffs) == 0:
+        return default_width
+    return float(np.clip(0.62 * diffs.min(), 0.010, 0.050))
+
+
+def max_envelope_volume_for_lift(lift_df: pd.DataFrame) -> float:
+    vals, envelope = build_true_pr_and_envelope(lift_df)
+    sets_grid, reps_grid = _grid_sr(envelope.shape)
+    mask = observed_envelope_mask(vals) & np.isfinite(envelope) & (envelope > 0)
+    if not mask.any():
+        return float((lift_df["weight"] * lift_df["sets"] * lift_df["reps"]).max())
+    volumes = envelope * sets_grid * reps_grid
+    return float(np.nanmax(np.where(mask, volumes, np.nan)))
+
+
 def build_true_pr_and_envelope(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     max_sets = max(10, int(df["sets"].max()))
     max_reps = max(8, int(df["reps"].max()))
@@ -662,7 +707,7 @@ def make_session_summary_plot(df: pd.DataFrame, months_back=None, title="Session
     volume_color = "#79d79b"
     volume_fill = "#2f7a53"
 
-    bar_width = 0.018 if len(x) > 1 else 0.05
+    bar_width = compute_continuous_bar_width(x, default_width=0.05)
 
     for ax in (ax1, ax2):
         ax.set_facecolor(panel_color)
@@ -685,15 +730,16 @@ def make_session_summary_plot(df: pd.DataFrame, months_back=None, title="Session
     ax1.set_ylabel("Max Weight", color=text_color, fontsize=11)
     ax2.set_ylabel("Volume", color=text_color, fontsize=11)
 
-    x_ticks = x if len(x) > 0 else np.array([])
-    ax2.set_xticks(x_ticks)
-    ax2.set_xticklabels([""] * len(x_ticks))
-    ax2.set_xlabel("Training Session", color=muted_text, fontsize=10)
+    week_x, week_labels = compute_weekly_tick_positions(daily["date"])
+    ax2.set_xticks(week_x)
+    ax2.set_xticklabels(week_labels, rotation=0, ha="center", color=muted_text)
+    ax2.tick_params(axis="x", length=5, color=muted_text)
+    ax2.set_xlabel("Week", color=muted_text, fontsize=10)
 
     if len(x) <= 1:
         x_left, x_right = -0.06, 1.06
     else:
-        x_left, x_right = x.min() - 0.03, x.max() + 0.03
+        x_left, x_right = -0.03, 1.03
     ax1.set_xlim(x_left, x_right)
     ax2.set_xlim(x_left, x_right)
 
@@ -733,25 +779,38 @@ def parse_all_lifts_df(payload: dict) -> pd.DataFrame:
 def make_all_lift_volume_plot(df: pd.DataFrame, months_back=None, title="All-Lift Volume"):
     df_plot = filter_df_by_months_back(df, months_back)
 
+    max_volume_by_lift = {}
+    for lift_name, lift_df in df.groupby("lift", sort=False):
+        max_volume = max_envelope_volume_for_lift(lift_df)
+        if np.isfinite(max_volume) and max_volume > 0:
+            max_volume_by_lift[lift_name] = max_volume
+
     daily = (
         df_plot.groupby(["date", "lift"], as_index=False)["volume"]
         .sum()
         .sort_values(["date", "lift"])
     )
-    daily = daily[daily["volume"] > 0]
+    daily = daily[daily["volume"] > 0].copy()
+    daily["max_volume"] = daily["lift"].map(max_volume_by_lift)
+    daily = daily[(daily["max_volume"].notna()) & (daily["max_volume"] > 0)]
+    daily["relative_volume"] = daily["volume"] / daily["max_volume"]
+
     if daily.empty:
         raise ValueError("No nonzero volume to plot.")
 
-    pivot = daily.pivot(index="date", columns="lift", values="volume").fillna(0.0)
+    pivot = daily.pivot(index="date", columns="lift", values="relative_volume").fillna(0.0)
     pivot = pivot.loc[:, pivot.sum(axis=0).sort_values(ascending=False).index]
 
-    dates = list(pivot.index)
-    x = np.arange(len(dates), dtype=float)
+    dates = pd.Series(pivot.index)
+    unique_dates, normalized_times = compute_normalized_session_times(dates)
+    time_lookup = {pd.Timestamp(d).normalize(): t for d, t in zip(unique_dates, normalized_times)}
+    x = np.array([time_lookup[pd.Timestamp(d).normalize()] for d in pivot.index], dtype=float)
+
     lift_names = list(pivot.columns)
     n_lifts = len(lift_names)
 
     legend_rows = int(np.ceil(max(n_lifts, 1) / 2.0))
-    extra_height = min(4.2, 0.34 * legend_rows + 0.8)
+    extra_height = min(4.4, 0.38 * legend_rows + 0.8)
     fig_height = 5.2 + extra_height
     fig, ax = plt.subplots(figsize=(10.8, fig_height))
 
@@ -775,7 +834,8 @@ def make_all_lift_volume_plot(df: pd.DataFrame, months_back=None, title="All-Lif
     colors = [cmap(i / denom) for i in range(n_lifts)]
 
     bottom = np.zeros(len(pivot), dtype=float)
-    bar_width = 0.78 if len(x) > 1 else 0.35
+    bar_width = compute_continuous_bar_width(x, default_width=0.05)
+
     for lift_name, color in zip(lift_names, colors):
         vals = pivot[lift_name].to_numpy(dtype=float)
         ax.bar(
@@ -790,22 +850,20 @@ def make_all_lift_volume_plot(df: pd.DataFrame, months_back=None, title="All-Lif
         )
         bottom += vals
 
-    ax.set_ylabel("Daily Volume", color=text_color, fontsize=11)
-    ax.set_xlabel("Training Day", color=muted_text, fontsize=10)
+    ax.set_ylabel("Relative Daily Volume", color=text_color, fontsize=11)
+    ax.set_xlabel("Week", color=muted_text, fontsize=10)
     ax.set_title(title, color=text_color, fontsize=14, pad=12)
 
-    if len(x) <= 12:
-        labels = [pd.Timestamp(d).strftime("%b %-d") for d in dates]
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=35, ha="right", color=muted_text)
-    else:
-        tick_count = min(10, len(x))
-        tick_idx = np.linspace(0, len(x) - 1, tick_count).round().astype(int)
-        labels = [pd.Timestamp(dates[i]).strftime("%b %-d") for i in tick_idx]
-        ax.set_xticks(x[tick_idx])
-        ax.set_xticklabels(labels, rotation=35, ha="right", color=muted_text)
+    week_x, week_labels = compute_weekly_tick_positions(pd.Series(pivot.index))
+    ax.set_xticks(week_x)
+    ax.set_xticklabels(week_labels, rotation=0, ha="center", color=muted_text)
+    ax.tick_params(axis="x", length=5, color=muted_text)
 
-    ax.set_xlim(-0.6, len(x) - 0.4)
+    if len(x) <= 1:
+        ax.set_xlim(-0.06, 1.06)
+    else:
+        ax.set_xlim(-0.03, 1.03)
+
     ymax = float(bottom.max()) if len(bottom) else 1.0
     ax.set_ylim(0, ymax * 1.08 if ymax > 0 else 1.0)
 
@@ -814,19 +872,20 @@ def make_all_lift_volume_plot(df: pd.DataFrame, months_back=None, title="All-Lif
         bbox_to_anchor=(0.5, -0.22),
         ncol=2,
         frameon=False,
-        fontsize=9,
+        fontsize=10,
         labelcolor=text_color,
-        columnspacing=1.7,
-        handlelength=1.6,
-        handletextpad=0.6,
+        columnspacing=1.8,
+        handlelength=1.7,
+        handletextpad=0.65,
         borderaxespad=0.0,
     )
     for text in legend.get_texts():
         text.set_color(text_color)
 
-    bottom_margin = min(0.48, 0.18 + 0.035 * legend_rows)
+    bottom_margin = min(0.50, 0.19 + 0.04 * legend_rows)
     fig.subplots_adjust(left=0.09, right=0.98, top=0.9, bottom=bottom_margin)
     return fig
+
 
 def parse_request_df():
     data = request.get_json()
