@@ -702,6 +702,132 @@ def make_session_summary_plot(df: pd.DataFrame, months_back=None, title="Session
     return fig
 
 
+
+def parse_all_lifts_df(payload: dict) -> pd.DataFrame:
+    lifts = payload.get("all_lifts") or payload.get("lifts") or []
+    if not lifts:
+        raise ValueError("No lift data provided.")
+
+    df = pd.DataFrame(lifts)
+    required_cols = {"lift", "date", "weight", "sets", "reps"}
+    if not required_cols.issubset(df.columns):
+        raise ValueError("All-lift data missing lift, date, weight, sets, or reps fields.")
+
+    df["lift"] = df["lift"].fillna("").astype(str).str.strip()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.normalize()
+    df["weight"] = pd.to_numeric(df["weight"], errors="coerce")
+    df["sets"] = pd.to_numeric(df["sets"], errors="coerce")
+    df["reps"] = pd.to_numeric(df["reps"], errors="coerce")
+
+    df = df.dropna(subset=["date", "weight", "sets", "reps"]).copy()
+    df = df[(df["lift"] != "") & (df["weight"] > 0) & (df["sets"] > 0) & (df["reps"] > 0)]
+    if df.empty:
+        raise ValueError("No valid all-lift data after parsing.")
+
+    df["sets"] = df["sets"].astype(int)
+    df["reps"] = df["reps"].astype(int)
+    df["volume"] = df["weight"] * df["sets"] * df["reps"]
+    return df.sort_values(["date", "lift"])
+
+
+def make_all_lift_volume_plot(df: pd.DataFrame, months_back=None, title="All-Lift Volume"):
+    df_plot = filter_df_by_months_back(df, months_back)
+
+    daily = (
+        df_plot.groupby(["date", "lift"], as_index=False)["volume"]
+        .sum()
+        .sort_values(["date", "lift"])
+    )
+    daily = daily[daily["volume"] > 0]
+    if daily.empty:
+        raise ValueError("No nonzero volume to plot.")
+
+    pivot = daily.pivot(index="date", columns="lift", values="volume").fillna(0.0)
+    pivot = pivot.loc[:, pivot.sum(axis=0).sort_values(ascending=False).index]
+
+    dates = list(pivot.index)
+    x = np.arange(len(dates), dtype=float)
+    lift_names = list(pivot.columns)
+    n_lifts = len(lift_names)
+
+    legend_rows = int(np.ceil(max(n_lifts, 1) / 2.0))
+    extra_height = min(4.2, 0.34 * legend_rows + 0.8)
+    fig_height = 5.2 + extra_height
+    fig, ax = plt.subplots(figsize=(10.8, fig_height))
+
+    fig.patch.set_facecolor("#171a21")
+    ax.set_facecolor("#1d2230")
+    grid_color = "#3a4458"
+    spine_color = "#2a3140"
+    text_color = "#e8ecf1"
+    muted_text = "#a8b0bd"
+
+    for spine in ax.spines.values():
+        spine.set_color(spine_color)
+    ax.tick_params(colors=muted_text, labelsize=9)
+    ax.grid(True, axis="y", color=grid_color, alpha=0.35, linewidth=0.8)
+    ax.grid(False, axis="x")
+    ax.set_axisbelow(True)
+
+    cmap_name = "tab20" if n_lifts <= 20 else "turbo"
+    cmap = plt.get_cmap(cmap_name)
+    denom = max(n_lifts - 1, 1)
+    colors = [cmap(i / denom) for i in range(n_lifts)]
+
+    bottom = np.zeros(len(pivot), dtype=float)
+    bar_width = 0.78 if len(x) > 1 else 0.35
+    for lift_name, color in zip(lift_names, colors):
+        vals = pivot[lift_name].to_numpy(dtype=float)
+        ax.bar(
+            x,
+            vals,
+            bottom=bottom,
+            width=bar_width,
+            color=color,
+            edgecolor="#0f1115",
+            linewidth=0.35,
+            label=lift_name,
+        )
+        bottom += vals
+
+    ax.set_ylabel("Daily Volume", color=text_color, fontsize=11)
+    ax.set_xlabel("Training Day", color=muted_text, fontsize=10)
+    ax.set_title(title, color=text_color, fontsize=14, pad=12)
+
+    if len(x) <= 12:
+        labels = [pd.Timestamp(d).strftime("%b %-d") for d in dates]
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=35, ha="right", color=muted_text)
+    else:
+        tick_count = min(10, len(x))
+        tick_idx = np.linspace(0, len(x) - 1, tick_count).round().astype(int)
+        labels = [pd.Timestamp(dates[i]).strftime("%b %-d") for i in tick_idx]
+        ax.set_xticks(x[tick_idx])
+        ax.set_xticklabels(labels, rotation=35, ha="right", color=muted_text)
+
+    ax.set_xlim(-0.6, len(x) - 0.4)
+    ymax = float(bottom.max()) if len(bottom) else 1.0
+    ax.set_ylim(0, ymax * 1.08 if ymax > 0 else 1.0)
+
+    legend = ax.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.22),
+        ncol=2,
+        frameon=False,
+        fontsize=9,
+        labelcolor=text_color,
+        columnspacing=1.7,
+        handlelength=1.6,
+        handletextpad=0.6,
+        borderaxespad=0.0,
+    )
+    for text in legend.get_texts():
+        text.set_color(text_color)
+
+    bottom_margin = min(0.48, 0.18 + 0.035 * legend_rows)
+    fig.subplots_adjust(left=0.09, right=0.98, top=0.9, bottom=bottom_margin)
+    return fig
+
 def parse_request_df():
     data = request.get_json()
 
@@ -821,6 +947,30 @@ def metric_png():
         return Response(f"Error generating metric plot: {str(e)}", status=500)
 
 
+
+
+@app.route("/all_volume.png", methods=["POST"])
+def all_volume_png():
+    try:
+        data = request.get_json() or {}
+        controls = data.get("controls", {})
+        summary_months_back = controls.get("summary_months_back")
+        summary_months_back = None if summary_months_back in ("", None) else float(summary_months_back)
+
+        df = parse_all_lifts_df(data)
+        fig = make_all_lift_volume_plot(
+            df,
+            months_back=summary_months_back,
+            title="All-Lift Daily Volume",
+        )
+
+        buf = BytesIO()
+        fig.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor())
+        plt.close(fig)
+        buf.seek(0)
+        return Response(buf.getvalue(), mimetype="image/png")
+    except Exception as e:
+        return Response(f"Error generating all-lift volume plot: {str(e)}", status=500)
 
 @app.route("/recommendations", methods=["POST"])
 def recommendations():
