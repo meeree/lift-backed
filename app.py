@@ -776,12 +776,10 @@ def parse_all_lifts_df(payload: dict) -> pd.DataFrame:
     return df.sort_values(["date", "lift"])
 
 
-def daily_relative_volume_pivot(df: pd.DataFrame, months_back=None) -> pd.DataFrame:
-    """Daily volume by lift, divided by that lift's total logged volume."""
+def make_all_lift_volume_plot(df: pd.DataFrame, months_back=None, title="All-Lift Volume"):
     df_plot = filter_df_by_months_back(df, months_back)
 
-    total_volume_by_lift = df.groupby("lift")["volume"].sum()
-    total_volume_by_lift = total_volume_by_lift[total_volume_by_lift > 0]
+    total_volume_by_lift = df.groupby("lift")["volume"].sum().to_dict()
 
     daily = (
         df_plot.groupby(["date", "lift"], as_index=False)["volume"]
@@ -789,20 +787,15 @@ def daily_relative_volume_pivot(df: pd.DataFrame, months_back=None) -> pd.DataFr
         .sort_values(["date", "lift"])
     )
     daily = daily[daily["volume"] > 0].copy()
-    daily["total_lift_volume"] = daily["lift"].map(total_volume_by_lift)
-    daily = daily[(daily["total_lift_volume"].notna()) & (daily["total_lift_volume"] > 0)]
-    daily["relative_volume"] = daily["volume"] / daily["total_lift_volume"]
+    daily["total_volume"] = daily["lift"].map(total_volume_by_lift)
+    daily = daily[(daily["total_volume"].notna()) & (daily["total_volume"] > 0)]
+    daily["relative_volume"] = daily["volume"] / daily["total_volume"]
 
     if daily.empty:
         raise ValueError("No nonzero volume to plot.")
 
     pivot = daily.pivot(index="date", columns="lift", values="relative_volume").fillna(0.0)
     pivot = pivot.loc[:, pivot.sum(axis=0).sort_values(ascending=False).index]
-    return pivot
-
-
-def make_all_lift_volume_plot(df: pd.DataFrame, months_back=None, title="All-Lift Volume"):
-    pivot = daily_relative_volume_pivot(df, months_back=months_back)
 
     dates = pd.Series(pivot.index)
     unique_dates, normalized_times = compute_normalized_session_times(dates)
@@ -853,7 +846,7 @@ def make_all_lift_volume_plot(df: pd.DataFrame, months_back=None, title="All-Lif
         )
         bottom += vals
 
-    ax.set_ylabel("Relative Volume Share", color=text_color, fontsize=11)
+    ax.set_ylabel("Daily / Total Lift Volume", color=text_color, fontsize=11)
     ax.set_xlabel("Week", color=muted_text, fontsize=10)
     ax.set_title(title, color=text_color, fontsize=14, pad=12)
 
@@ -889,81 +882,6 @@ def make_all_lift_volume_plot(df: pd.DataFrame, months_back=None, title="All-Lif
     fig.subplots_adjust(left=0.09, right=0.98, top=0.9, bottom=bottom_margin)
     return fig
 
-
-def make_volume_contribution_grid(df: pd.DataFrame, months_back=None, title="Training Contributions"):
-    pivot = daily_relative_volume_pivot(df, months_back=months_back)
-    daily_total = pivot.sum(axis=1).sort_index()
-
-    start = pd.Timestamp(daily_total.index.min()).normalize()
-    end = pd.Timestamp(daily_total.index.max()).normalize()
-    start_grid = start - pd.Timedelta(days=(start.weekday() + 1) % 7)
-    end_grid = end + pd.Timedelta(days=(5 - end.weekday()) % 7)
-    all_dates = pd.date_range(start=start_grid, end=end_grid, freq="D")
-
-    n_weeks = int(np.ceil(len(all_dates) / 7))
-    fig_width = max(8.8, min(18.0, 1.05 + 0.24 * n_weeks))
-    fig_height = 2.9
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-
-    fig.patch.set_facecolor("#171a21")
-    ax.set_facecolor("#171a21")
-    text_color = "#e8ecf1"
-    muted_text = "#a8b0bd"
-    empty_color = "#10141c"
-    levels = ["#0e4429", "#006d32", "#26a641", "#39d353"]
-
-    nonzero = daily_total[daily_total > 0]
-    thresholds = list(np.quantile(nonzero.to_numpy(dtype=float), [0.25, 0.50, 0.75])) if len(nonzero) else [0.0, 0.0, 0.0]
-
-    def contribution_color(value: float) -> str:
-        if value <= 0:
-            return empty_color
-        if value <= thresholds[0]:
-            return levels[0]
-        if value <= thresholds[1]:
-            return levels[1]
-        if value <= thresholds[2]:
-            return levels[2]
-        return levels[3]
-
-    square_size = 0.78
-    for d in all_dates:
-        week = int((d - start_grid).days // 7)
-        dow = int((d.weekday() + 1) % 7)
-        value = float(daily_total.get(d, 0.0)) if start <= d <= end else 0.0
-        rect = plt.Rectangle((week, dow), square_size, square_size, facecolor=contribution_color(value), edgecolor="#0b0d11", linewidth=0.8)
-        ax.add_patch(rect)
-
-    month_starts = pd.date_range(start=start.replace(day=1), end=end, freq="MS")
-    if start.day != 1:
-        month_starts = pd.DatetimeIndex([start]).append(month_starts)
-    last_label_x = -10
-    for m in month_starts:
-        week = int((m - start_grid).days // 7)
-        if week - last_label_x >= 3:
-            ax.text(week, -0.62, m.strftime("%b"), color=muted_text, fontsize=9, ha="left", va="center")
-            last_label_x = week
-
-    for label, y in [("Mon", 1), ("Wed", 3), ("Fri", 5)]:
-        ax.text(-1.05, y + square_size / 2, label, color=muted_text, fontsize=8.5, ha="right", va="center")
-
-    ax.text(0, -1.15, title, color=text_color, fontsize=13, fontweight="bold", ha="left", va="center")
-    ax.text(0, 7.62, "Relative volume by day", color=muted_text, fontsize=9, ha="left", va="center")
-
-    legend_x = max(n_weeks - 7.2, 0)
-    legend_y = 7.38
-    ax.text(legend_x, legend_y + 0.19, "Less", color=muted_text, fontsize=8.5, ha="right", va="center")
-    legend_colors = [empty_color] + levels
-    for i, color in enumerate(legend_colors):
-        ax.add_patch(plt.Rectangle((legend_x + 0.22 + i * 0.55, legend_y), 0.38, 0.38, facecolor=color, edgecolor="#0b0d11", linewidth=0.7))
-    ax.text(legend_x + 0.22 + len(legend_colors) * 0.55 + 0.08, legend_y + 0.19, "More", color=muted_text, fontsize=8.5, ha="left", va="center")
-
-    ax.set_xlim(-1.4, n_weeks + 0.2)
-    ax.set_ylim(8.2, -1.5)
-    ax.set_aspect("equal", adjustable="box")
-    ax.axis("off")
-    fig.subplots_adjust(left=0.025, right=0.995, top=0.96, bottom=0.06)
-    return fig
 
 def parse_request_df():
     data = request.get_json()
@@ -1098,7 +1016,7 @@ def all_volume_png():
         fig = make_all_lift_volume_plot(
             df,
             months_back=summary_months_back,
-            title="All-Lift Daily Relative Volume",
+            title="All-Lift Daily Volume",
         )
 
         buf = BytesIO()
@@ -1108,30 +1026,6 @@ def all_volume_png():
         return Response(buf.getvalue(), mimetype="image/png")
     except Exception as e:
         return Response(f"Error generating all-lift volume plot: {str(e)}", status=500)
-
-
-@app.route("/volume_contributions.png", methods=["POST"])
-def volume_contributions_png():
-    try:
-        data = request.get_json() or {}
-        controls = data.get("controls", {})
-        summary_months_back = controls.get("summary_months_back")
-        summary_months_back = None if summary_months_back in ("", None) else float(summary_months_back)
-
-        df = parse_all_lifts_df(data)
-        fig = make_volume_contribution_grid(
-            df,
-            months_back=summary_months_back,
-            title="Training Contributions",
-        )
-
-        buf = BytesIO()
-        fig.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor())
-        plt.close(fig)
-        buf.seek(0)
-        return Response(buf.getvalue(), mimetype="image/png")
-    except Exception as e:
-        return Response(f"Error generating contribution grid: {str(e)}", status=500)
 
 @app.route("/recommendations", methods=["POST"])
 def recommendations():
