@@ -19,6 +19,50 @@ METRIC_OPTIONS = {
 }
 
 
+
+def plot_theme(theme: str | None = "dark") -> dict:
+    """Shared color palettes for generated Matplotlib plots."""
+    if str(theme).lower() == "light":
+        return {
+            "name": "light",
+            "fig": "#f4dfad",
+            "panel": "#fff3d1",
+            "panel_alt": "#f8e3b3",
+            "grid": "#c9933b",
+            "spine": "#9a5b20",
+            "text": "#2d160b",
+            "muted": "#6e4b24",
+            "accent": "#b94a1f",
+            "accent_2": "#24747f",
+            "good": "#2f8f55",
+            "good_fill": "#75b96e",
+            "bad": "#b84a35",
+            "edge": "#3d230f",
+            "missing": "#2b1a10",
+            "cmap": "YlOrBr",
+            "marker_cmap": "summer",
+        }
+    return {
+        "name": "dark",
+        "fig": "#080c10",
+        "panel": "#0e151c",
+        "panel_alt": "#111c26",
+        "grid": "#1f4b5c",
+        "spine": "#1d3d49",
+        "text": "#edf7fb",
+        "muted": "#93a8b2",
+        "accent": "#27d8ee",
+        "accent_2": "#9defff",
+        "good": "#33d6a6",
+        "good_fill": "#116c58",
+        "bad": "#ff6f61",
+        "edge": "#031016",
+        "missing": "#03070a",
+        "cmap": "viridis",
+        "marker_cmap": "Wistia",
+    }
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -545,7 +589,8 @@ def generate_session_recommendations(df: pd.DataFrame, top_k: int = 10) -> dict:
     }
 
 
-def my_grid(df: pd.DataFrame, vmin=None, vmax=None, increment=10, title="PR Bingo Chart"):
+def my_grid(df: pd.DataFrame, vmin=None, vmax=None, increment=10, title="PR Bingo Chart", theme="dark"):
+    colors = plot_theme(theme)
     vals, envelope = build_true_pr_and_envelope(df)
     marker_df = compute_marker_points(df)
 
@@ -564,7 +609,6 @@ def my_grid(df: pd.DataFrame, vmin=None, vmax=None, increment=10, title="PR Bing
     times = np.array(times, dtype=float)
 
     auto_vmin, auto_vmax = auto_color_range(envelope, increment)
-
     if vmin is None:
         vmin = auto_vmin
     if vmax is None:
@@ -572,15 +616,18 @@ def my_grid(df: pd.DataFrame, vmin=None, vmax=None, increment=10, title="PR Bing
     if vmax <= vmin:
         vmax = vmin + increment
 
-    fig = plt.figure(figsize=(6, 5))
-    cmap = plt.get_cmap("tab20b").copy()
-    cmap.set_bad(color="black")
+    fig, ax = plt.subplots(figsize=(6.4, 5.2))
+    fig.patch.set_facecolor(colors["fig"])
+    ax.set_facecolor(colors["panel"])
+
+    cmap = plt.get_cmap(colors["cmap"]).copy()
+    cmap.set_bad(color=colors["missing"])
 
     clipped = envelope.copy()
     clipped[clipped > vmax] = np.nan
     clipped[clipped < vmin] = np.nan
 
-    plt.imshow(
+    im = ax.imshow(
         clipped,
         interpolation="none",
         origin="lower",
@@ -590,34 +637,54 @@ def my_grid(df: pd.DataFrame, vmin=None, vmax=None, increment=10, title="PR Bing
         vmax=vmax,
     )
 
-    plt.yticks(np.arange(0, vals.shape[0]), np.arange(1, vals.shape[0] + 1))
-    plt.xticks(np.arange(0, vals.shape[1]), np.arange(1, vals.shape[1] + 1))
-    plt.colorbar(ticks=np.arange(vmin + increment / 2, vmax + 3 * increment / 2, increment))
+    ax.set_yticks(np.arange(0, vals.shape[0]))
+    ax.set_yticklabels(np.arange(1, vals.shape[0] + 1), color=colors["muted"])
+    ax.set_xticks(np.arange(0, vals.shape[1]))
+    ax.set_xticklabels(np.arange(1, vals.shape[1] + 1), color=colors["muted"])
+    ax.tick_params(colors=colors["muted"])
+    for spine in ax.spines.values():
+        spine.set_color(colors["spine"])
+
+    cbar = fig.colorbar(im, ax=ax, ticks=np.arange(vmin + increment / 2, vmax + 3 * increment / 2, increment))
+    cbar.ax.tick_params(colors=colors["muted"])
+    cbar.outline.set_edgecolor(colors["spine"])
 
     if len(record) > 0:
         record = np.array(record).T
-        plt.scatter(record[1], record[0], c=times, cmap="Wistia", marker="^", s=80)
+        ax.scatter(
+            record[1],
+            record[0],
+            c=times,
+            cmap=colors["marker_cmap"],
+            marker="^",
+            s=82,
+            edgecolors=colors["edge"],
+            linewidths=0.45,
+        )
 
-    plt.xlabel("Reps", fontsize=14)
-    plt.ylabel("Sets", fontsize=14)
-    plt.title(title, fontsize=14)
-    plt.tight_layout()
+    ax.set_xlabel("Reps", fontsize=14, color=colors["text"])
+    ax.set_ylabel("Sets", fontsize=14, color=colors["text"])
+    ax.set_title(title, fontsize=14, color=colors["text"], pad=10)
+    fig.tight_layout()
     return fig
 
 
-
-
-def make_metric_diff_plot(df: pd.DataFrame, title: str = "Metric Over/Under"):
+def make_metric_diff_plot(df: pd.DataFrame, title: str = "Metric Over/Under", theme="dark"):
+    colors = plot_theme(theme)
     data = compute_metric_diffs(df)
     metric_names = list(METRIC_OPTIONS.keys())
     diffs = [data["diffs"][metric_name] for metric_name in metric_names]
     max_abs = data["max_abs"]
 
     fig, axes = plt.subplots(1, 3, figsize=(15.2, 4.9), constrained_layout=True)
+    fig.patch.set_facecolor(colors["fig"])
     cmap = plt.get_cmap("coolwarm").copy()
-    cmap.set_bad(color="#f2f2f2")
+    cmap.set_bad(color=colors["panel_alt"])
 
     for ax, metric_name, diff in zip(axes, metric_names, diffs):
+        ax.set_facecolor(colors["panel"])
+        for spine in ax.spines.values():
+            spine.set_color(colors["spine"])
         im = ax.imshow(
             diff,
             interpolation="none",
@@ -628,12 +695,13 @@ def make_metric_diff_plot(df: pd.DataFrame, title: str = "Metric Over/Under"):
             vmax=max_abs,
         )
         ax.set_xticks(np.arange(0, diff.shape[1]))
-        ax.set_xticklabels(np.arange(1, diff.shape[1] + 1))
+        ax.set_xticklabels(np.arange(1, diff.shape[1] + 1), color=colors["muted"])
         ax.set_yticks(np.arange(0, diff.shape[0]))
-        ax.set_yticklabels(np.arange(1, diff.shape[0] + 1))
-        ax.set_xlabel("Reps", fontsize=11)
-        ax.set_ylabel("Sets", fontsize=11)
-        ax.set_title(METRIC_OPTIONS[metric_name], fontsize=12)
+        ax.set_yticklabels(np.arange(1, diff.shape[0] + 1), color=colors["muted"])
+        ax.tick_params(colors=colors["muted"])
+        ax.set_xlabel("Reps", fontsize=11, color=colors["text"])
+        ax.set_ylabel("Sets", fontsize=11, color=colors["text"])
+        ax.set_title(METRIC_OPTIONS[metric_name], fontsize=12, color=colors["text"])
 
         for i in range(diff.shape[0]):
             for j in range(diff.shape[1]):
@@ -641,13 +709,16 @@ def make_metric_diff_plot(df: pd.DataFrame, title: str = "Metric Over/Under"):
                 if not np.isfinite(value):
                     continue
                 text = f"{int(np.rint(value))}"
-                text_color = "black" if abs(value) < 0.55 * max_abs else "white"
+                text_color = "#080c10" if abs(value) < 0.55 * max_abs else "#ffffff"
                 ax.text(j, i, text, ha="center", va="center", fontsize=8, color=text_color)
 
     cbar = fig.colorbar(im, ax=axes, shrink=0.92, pad=0.02)
-    cbar.set_label("Predicted - Envelope", rotation=90)
-    fig.suptitle(title, fontsize=14)
+    cbar.set_label("Predicted - Envelope", rotation=90, color=colors["text"])
+    cbar.ax.tick_params(colors=colors["muted"])
+    cbar.outline.set_edgecolor(colors["spine"])
+    fig.suptitle(title, fontsize=14, color=colors["text"])
     return fig
+
 
 def filter_df_by_months_back(df: pd.DataFrame, months_back) -> pd.DataFrame:
     if months_back in (None, "", 0):
@@ -670,7 +741,8 @@ def filter_df_by_months_back(df: pd.DataFrame, months_back) -> pd.DataFrame:
     return filtered
 
 
-def make_session_summary_plot(df: pd.DataFrame, months_back=None, title="Session Summary"):
+def make_session_summary_plot(df: pd.DataFrame, months_back=None, title="Session Summary", theme="dark"):
+    colors = plot_theme(theme)
     df_plot = filter_df_by_months_back(df, months_back)
 
     volume_by_day = (df_plot["weight"] * df_plot["sets"] * df_plot["reps"]).groupby(df_plot["date"]).sum()
@@ -696,16 +768,16 @@ def make_session_summary_plot(df: pd.DataFrame, months_back=None, title="Session
         gridspec_kw={"height_ratios": [1, 1], "hspace": 0.12},
     )
 
-    fig.patch.set_facecolor("#171a21")
-    panel_color = "#1d2230"
-    grid_color = "#3a4458"
-    spine_color = "#2a3140"
-    text_color = "#e8ecf1"
-    muted_text = "#a8b0bd"
-    weight_color = "#8fd3ff"
-    weight_fill = "#2f6ea5"
-    volume_color = "#79d79b"
-    volume_fill = "#2f7a53"
+    fig.patch.set_facecolor(colors["fig"])
+    panel_color = colors["panel"]
+    grid_color = colors["grid"]
+    spine_color = colors["spine"]
+    text_color = colors["text"]
+    muted_text = colors["muted"]
+    weight_color = colors["accent_2"]
+    weight_fill = colors["accent"]
+    volume_color = colors["good"]
+    volume_fill = colors["good_fill"]
 
     bar_width = compute_continuous_bar_width(x, default_width=0.05)
 
@@ -718,13 +790,13 @@ def make_session_summary_plot(df: pd.DataFrame, months_back=None, title="Session
         ax.grid(False, axis="x")
 
     if len(max_weight) > 0:
-        ax1.plot(x, max_weight, color=weight_color, linewidth=1.9, alpha=0.9)
-        ax1.bar(x, max_weight, width=bar_width, color=weight_fill, edgecolor=weight_color, linewidth=1.2, alpha=0.9)
+        ax1.plot(x, max_weight, color=weight_color, linewidth=1.9, alpha=0.95)
+        ax1.bar(x, max_weight, width=bar_width, color=weight_fill, edgecolor=weight_color, linewidth=1.2, alpha=0.78)
         ax1.set_ylim(0.8 * max_weight.min(), 1.1 * max_weight.max())
 
     if len(volume) > 0:
-        ax2.bar(x, volume, width=bar_width, color=volume_fill, edgecolor=volume_color, linewidth=1.2, alpha=0.9)
-        ax2.plot(x, volume, color=volume_color, linewidth=1.9, alpha=0.9)
+        ax2.bar(x, volume, width=bar_width, color=volume_fill, edgecolor=volume_color, linewidth=1.2, alpha=0.82)
+        ax2.plot(x, volume, color=volume_color, linewidth=1.9, alpha=0.95)
         ax2.set_ylim(0.8 * volume.min(), 1.1 * volume.max())
 
     ax1.set_ylabel("Max Weight", color=text_color, fontsize=11)
@@ -746,7 +818,6 @@ def make_session_summary_plot(df: pd.DataFrame, months_back=None, title="Session
     fig.suptitle(title, fontsize=14, color=text_color, y=0.98)
     fig.tight_layout()
     return fig
-
 
 
 def parse_all_lifts_df(payload: dict) -> pd.DataFrame:
@@ -776,10 +847,9 @@ def parse_all_lifts_df(payload: dict) -> pd.DataFrame:
     return df.sort_values(["date", "lift"])
 
 
-def make_all_lift_volume_plot(df: pd.DataFrame, months_back=None, title="All-Lift Volume"):
+def make_all_lift_volume_plot(df: pd.DataFrame, months_back=None, title="All-Lift Volume", theme="dark"):
+    colors_theme = plot_theme(theme)
     df_plot = filter_df_by_months_back(df, months_back)
-
-    total_volume_by_lift = df.groupby("lift")["volume"].sum().to_dict()
 
     daily = (
         df_plot.groupby(["date", "lift"], as_index=False)["volume"]
@@ -787,12 +857,17 @@ def make_all_lift_volume_plot(df: pd.DataFrame, months_back=None, title="All-Lif
         .sort_values(["date", "lift"])
     )
     daily = daily[daily["volume"] > 0].copy()
-    daily["total_volume"] = daily["lift"].map(total_volume_by_lift)
-    daily = daily[(daily["total_volume"].notna()) & (daily["total_volume"] > 0)]
-    daily["relative_volume"] = daily["volume"] / daily["total_volume"]
 
     if daily.empty:
         raise ValueError("No nonzero volume to plot.")
+
+    # Normalize each lift by its own biggest daily volume in the selected window.
+    # This keeps bench/squat/deadlift/etc. visually comparable without punishing
+    # a lift just because it has much more total logged history.
+    max_daily_volume_by_lift = daily.groupby("lift")["volume"].max().to_dict()
+    daily["max_daily_volume"] = daily["lift"].map(max_daily_volume_by_lift)
+    daily = daily[(daily["max_daily_volume"].notna()) & (daily["max_daily_volume"] > 0)]
+    daily["relative_volume"] = (daily["volume"] / daily["max_daily_volume"]).clip(0.0, 1.0)
 
     pivot = daily.pivot(index="date", columns="lift", values="relative_volume").fillna(0.0)
     pivot = pivot.loc[:, pivot.sum(axis=0).sort_values(ascending=False).index]
@@ -810,12 +885,12 @@ def make_all_lift_volume_plot(df: pd.DataFrame, months_back=None, title="All-Lif
     fig_height = 5.2 + extra_height
     fig, ax = plt.subplots(figsize=(10.8, fig_height))
 
-    fig.patch.set_facecolor("#171a21")
-    ax.set_facecolor("#1d2230")
-    grid_color = "#3a4458"
-    spine_color = "#2a3140"
-    text_color = "#e8ecf1"
-    muted_text = "#a8b0bd"
+    fig.patch.set_facecolor(colors_theme["fig"])
+    ax.set_facecolor(colors_theme["panel"])
+    grid_color = colors_theme["grid"]
+    spine_color = colors_theme["spine"]
+    text_color = colors_theme["text"]
+    muted_text = colors_theme["muted"]
 
     for spine in ax.spines.values():
         spine.set_color(spine_color)
@@ -827,26 +902,26 @@ def make_all_lift_volume_plot(df: pd.DataFrame, months_back=None, title="All-Lif
     cmap_name = "tab20" if n_lifts <= 20 else "turbo"
     cmap = plt.get_cmap(cmap_name)
     denom = max(n_lifts - 1, 1)
-    colors = [cmap(i / denom) for i in range(n_lifts)]
+    bar_colors = [cmap(i / denom) for i in range(n_lifts)]
 
     bottom = np.zeros(len(pivot), dtype=float)
     bar_width = compute_continuous_bar_width(x, default_width=0.05)
 
-    for lift_name, color in zip(lift_names, colors):
+    for lift_name, bar_color in zip(lift_names, bar_colors):
         vals = pivot[lift_name].to_numpy(dtype=float)
         ax.bar(
             x,
             vals,
             bottom=bottom,
             width=bar_width,
-            color=color,
-            edgecolor="#0f1115",
+            color=bar_color,
+            edgecolor=colors_theme["edge"],
             linewidth=0.35,
             label=lift_name,
         )
         bottom += vals
 
-    ax.set_ylabel("Daily / Total Lift Volume", color=text_color, fontsize=11)
+    ax.set_ylabel("Daily / Lift Max Daily Volume", color=text_color, fontsize=11)
     ax.set_xlabel("Week", color=muted_text, fontsize=10)
     ax.set_title(title, color=text_color, fontsize=14, pad=12)
 
@@ -900,6 +975,9 @@ def parse_request_df():
     vmax = controls.get("vmax")
     increment = controls.get("increment", 10)
     summary_months_back = controls.get("summary_months_back")
+    theme = str(controls.get("theme") or "dark").lower()
+    if theme not in {"dark", "light"}:
+        theme = "dark"
 
     vmin = None if vmin in ("", None) else float(vmin)
     vmax = None if vmax in ("", None) else float(vmax)
@@ -934,6 +1012,7 @@ def parse_request_df():
         "vmax": vmax,
         "increment": increment,
         "summary_months_back": summary_months_back,
+        "theme": theme,
     }
     return df, lift_name, controls_out, data, None
 
@@ -951,10 +1030,11 @@ def plot_png():
             vmax=controls["vmax"],
             increment=controls["increment"],
             title=lift_name,
+            theme=controls["theme"],
         )
 
         buf = BytesIO()
-        fig.savefig(buf, format="png", dpi=150)
+        fig.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor())
         plt.close(fig)
         buf.seek(0)
         return Response(buf.getvalue(), mimetype="image/png")
@@ -973,10 +1053,11 @@ def summary_png():
             df,
             months_back=controls["summary_months_back"],
             title=f"{lift_name} Session Summary",
+            theme=controls["theme"],
         )
 
         buf = BytesIO()
-        fig.savefig(buf, format="png", dpi=150)
+        fig.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor())
         plt.close(fig)
         buf.seek(0)
         return Response(buf.getvalue(), mimetype="image/png")
@@ -991,10 +1072,10 @@ def metric_png():
         if error_response is not None:
             return error_response
 
-        fig = make_metric_diff_plot(df, title=f"{lift_name} Over/Under")
+        fig = make_metric_diff_plot(df, title=f"{lift_name} Over/Under", theme=controls["theme"])
 
         buf = BytesIO()
-        fig.savefig(buf, format="png", dpi=150)
+        fig.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor())
         plt.close(fig)
         buf.seek(0)
         return Response(buf.getvalue(), mimetype="image/png")
@@ -1011,12 +1092,16 @@ def all_volume_png():
         controls = data.get("controls", {})
         summary_months_back = controls.get("summary_months_back")
         summary_months_back = None if summary_months_back in ("", None) else float(summary_months_back)
+        theme = str(controls.get("theme") or "dark").lower()
+        if theme not in {"dark", "light"}:
+            theme = "dark"
 
         df = parse_all_lifts_df(data)
         fig = make_all_lift_volume_plot(
             df,
             months_back=summary_months_back,
             title="All-Lift Daily Volume",
+            theme=theme,
         )
 
         buf = BytesIO()
