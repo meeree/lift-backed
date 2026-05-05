@@ -58,7 +58,7 @@ def plot_theme(theme: str | None = "dark") -> dict:
         "bad": "#ff6f61",
         "edge": "#031016",
         "missing": "#03070a",
-        "cmap": "tab20d",
+        "cmap": "tab20b",
         "marker_cmap": "Wistia",
     }
 
