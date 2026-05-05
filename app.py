@@ -39,7 +39,7 @@ def plot_theme(theme: str | None = "dark") -> dict:
             "bad": "#b84a35",
             "edge": "#3d230f",
             "missing": "#2b1a10",
-            "cmap": "YlOrBr",
+            "cmap": "tab20c",
             "marker_cmap": "summer",
         }
     return {
@@ -58,7 +58,7 @@ def plot_theme(theme: str | None = "dark") -> dict:
         "bad": "#ff6f61",
         "edge": "#031016",
         "missing": "#03070a",
-        "cmap": "viridis",
+        "cmap": "tab20d",
         "marker_cmap": "Wistia",
     }
 
@@ -958,6 +958,98 @@ def make_all_lift_volume_plot(df: pd.DataFrame, months_back=None, title="All-Lif
     return fig
 
 
+
+
+def parse_bodyweights_df(payload: dict) -> pd.DataFrame:
+    bodyweights = payload.get("bodyweights") or []
+    if not bodyweights:
+        raise ValueError("No bodyweight data provided.")
+
+    df = pd.DataFrame(bodyweights)
+    if "date" not in df.columns:
+        raise ValueError("Bodyweight data missing date field.")
+
+    if "bodyweight" not in df.columns and "weight" in df.columns:
+        df["bodyweight"] = df["weight"]
+
+    if "bodyweight" not in df.columns:
+        raise ValueError("Bodyweight data missing bodyweight field.")
+
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.normalize()
+    df["bodyweight"] = pd.to_numeric(df["bodyweight"], errors="coerce")
+    df = df.dropna(subset=["date", "bodyweight"]).copy()
+    if df.empty:
+        raise ValueError("No valid bodyweight data after parsing.")
+
+    return df.sort_values("date")
+
+
+def make_bodyweight_plot(df: pd.DataFrame, months_back=None, title="Bodyweight", theme="dark"):
+    colors = plot_theme(theme)
+    df_plot = filter_df_by_months_back(df, months_back)
+    if df_plot.empty:
+        raise ValueError("No bodyweight data to plot.")
+
+    raw = (
+        df_plot.groupby("date", as_index=False)["bodyweight"]
+        .median()
+        .sort_values("date")
+    )
+    raw["date"] = pd.to_datetime(raw["date"]).dt.normalize()
+
+    median_series = raw.set_index("date")["bodyweight"].sort_index().rolling("7D", min_periods=1).median()
+    median_df = median_series.reset_index(name="bodyweight_median_7d")
+
+    unique_dates, normalized_times = compute_normalized_session_times(raw["date"])
+    time_lookup = {pd.Timestamp(d).normalize(): t for d, t in zip(unique_dates, normalized_times)}
+    x_raw = np.array([time_lookup[pd.Timestamp(d).normalize()] for d in raw["date"]], dtype=float)
+    x_median = np.array([time_lookup[pd.Timestamp(d).normalize()] for d in median_df["date"]], dtype=float)
+
+    fig, ax = plt.subplots(figsize=(8.2, 4.4))
+    fig.patch.set_facecolor(colors["fig"])
+    ax.set_facecolor(colors["panel"])
+
+    for spine in ax.spines.values():
+        spine.set_color(colors["spine"])
+    ax.tick_params(colors=colors["muted"], labelsize=9)
+    ax.grid(True, axis="y", color=colors["grid"], alpha=0.35, linewidth=0.8)
+    ax.grid(False, axis="x")
+    ax.set_axisbelow(True)
+
+    raw_color = colors["bad"]
+    median_color = colors["accent"]
+
+    ax.scatter(x_raw, raw["bodyweight"].to_numpy(dtype=float), s=34, color=raw_color, alpha=0.82, edgecolors=colors["edge"], linewidths=0.45, label="Raw")
+    ax.plot(x_median, median_df["bodyweight_median_7d"].to_numpy(dtype=float), color=median_color, linewidth=2.2, alpha=0.96, label="7-day median")
+
+    week_x, week_labels = compute_weekly_tick_positions(raw["date"])
+    ax.set_xticks(week_x)
+    ax.set_xticklabels(week_labels, rotation=0, ha="center", color=colors["muted"])
+    ax.tick_params(axis="x", length=5, color=colors["muted"])
+
+    if len(x_raw) <= 1:
+        ax.set_xlim(-0.06, 1.06)
+    else:
+        ax.set_xlim(-0.03, 1.03)
+
+    y = raw["bodyweight"].to_numpy(dtype=float)
+    y_min = float(np.min(y))
+    y_max = float(np.max(y))
+    span = max(y_max - y_min, 1.0)
+    pad = max(1.5, 0.12 * span)
+    ax.set_ylim(y_min - pad, y_max + pad)
+
+    ax.set_ylabel("Bodyweight", color=colors["text"], fontsize=11)
+    ax.set_xlabel("Week", color=colors["muted"], fontsize=10)
+    ax.set_title(title, color=colors["text"], fontsize=14, pad=12)
+
+    legend = ax.legend(loc="upper left", frameon=False, fontsize=10)
+    for text in legend.get_texts():
+        text.set_color(colors["text"])
+
+    fig.tight_layout()
+    return fig
+
 def parse_request_df():
     data = request.get_json()
 
@@ -1111,6 +1203,36 @@ def all_volume_png():
         return Response(buf.getvalue(), mimetype="image/png")
     except Exception as e:
         return Response(f"Error generating all-lift volume plot: {str(e)}", status=500)
+
+
+
+@app.route("/bodyweight.png", methods=["POST"])
+def bodyweight_png():
+    try:
+        data = request.get_json() or {}
+        controls = data.get("controls", {})
+        summary_months_back = controls.get("summary_months_back")
+        summary_months_back = None if summary_months_back in ("", None) else float(summary_months_back)
+        theme = str(controls.get("theme") or "dark").lower()
+        if theme not in {"dark", "light"}:
+            theme = "dark"
+
+        df = parse_bodyweights_df(data)
+        fig = make_bodyweight_plot(
+            df,
+            months_back=summary_months_back,
+            title="Bodyweight and 7-Day Median",
+            theme=theme,
+        )
+
+        buf = BytesIO()
+        fig.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor())
+        plt.close(fig)
+        buf.seek(0)
+        return Response(buf.getvalue(), mimetype="image/png")
+    except Exception as e:
+        return Response(f"Error generating bodyweight plot: {str(e)}", status=500)
+
 
 @app.route("/recommendations", methods=["POST"])
 def recommendations():
