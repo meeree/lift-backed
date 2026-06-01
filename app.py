@@ -1275,5 +1275,262 @@ def recommendations():
         return Response(f"Error generating recommendations: {str(e)}", status=500)
 
 
+# -----------------------------
+# Rehab / Pain Tracker add-on
+# -----------------------------
+
+@app.route("/rehab")
+def rehab_page():
+    return render_template("rehab.html")
+
+
+def parse_rehab_payload(payload: dict) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    payload = payload or {}
+    controls = payload.get("controls", {}) or {}
+    theme = str(controls.get("theme") or "dark").lower()
+    if theme not in {"dark", "light"}:
+        theme = "dark"
+
+    pain_rows = payload.get("pain_logs") or []
+    exercise_rows = payload.get("exercise_logs") or []
+
+    pain_df = pd.DataFrame(pain_rows)
+    if pain_df.empty:
+        pain_df = pd.DataFrame(columns=["date", "right_hip", "neck", "ribs", "ankle", "notes"])
+    else:
+        pain_df["date"] = pd.to_datetime(pain_df.get("date"), errors="coerce").dt.normalize()
+        for col in ["right_hip", "neck", "ribs", "ankle"]:
+            if col not in pain_df.columns:
+                pain_df[col] = np.nan
+            pain_df[col] = pd.to_numeric(pain_df[col], errors="coerce")
+        if "notes" not in pain_df.columns:
+            pain_df["notes"] = ""
+        pain_df = pain_df.dropna(subset=["date"]).sort_values("date")
+
+    exercise_df = pd.DataFrame(exercise_rows)
+    if exercise_df.empty:
+        exercise_df = pd.DataFrame(columns=["date", "exercise", "sets", "reps", "minutes", "intensity", "notes"])
+    else:
+        exercise_df["date"] = pd.to_datetime(exercise_df.get("date"), errors="coerce").dt.normalize()
+        exercise_df["exercise"] = exercise_df.get("exercise", "").fillna("").astype(str).str.strip()
+        for col in ["sets", "reps", "minutes", "intensity"]:
+            if col not in exercise_df.columns:
+                exercise_df[col] = 0
+            exercise_df[col] = pd.to_numeric(exercise_df[col], errors="coerce").fillna(0)
+        if "notes" not in exercise_df.columns:
+            exercise_df["notes"] = ""
+        exercise_df = exercise_df.dropna(subset=["date"])
+        exercise_df = exercise_df[exercise_df["exercise"] != ""].sort_values(["date", "exercise"])
+
+    return pain_df, exercise_df, {"theme": theme}
+
+
+def _rehab_date_axis(dates: pd.Series):
+    parsed = pd.to_datetime(pd.Series(dates).dropna()).dt.normalize()
+    if parsed.empty:
+        return np.array([]), {}, np.array([]), []
+    unique = pd.Series(parsed.unique()).sort_values()
+    start = unique.min()
+    end = unique.max()
+    if start == end:
+        xs = np.array([0.0])
+    else:
+        span = float(end.toordinal() - start.toordinal())
+        xs = np.array([(pd.Timestamp(d).toordinal() - start.toordinal()) / span for d in unique], dtype=float)
+    lookup = {pd.Timestamp(d).normalize(): x for d, x in zip(unique, xs)}
+    week_x, week_labels = compute_weekly_tick_positions(unique)
+    return xs, lookup, week_x, week_labels
+
+
+def make_rehab_pain_plot(pain_df: pd.DataFrame, title="Pain Trend", theme="dark"):
+    colors = plot_theme(theme)
+    pain_cols = ["right_hip", "neck", "ribs", "ankle"]
+    if pain_df.empty:
+        raise ValueError("No pain logs to plot yet.")
+
+    daily = pain_df.groupby("date", as_index=False)[pain_cols].median().sort_values("date")
+    _, lookup, week_x, week_labels = _rehab_date_axis(daily["date"])
+    x = np.array([lookup[pd.Timestamp(d).normalize()] for d in daily["date"]], dtype=float)
+
+    fig, ax = plt.subplots(figsize=(8.6, 4.8))
+    fig.patch.set_facecolor(colors["fig"])
+    ax.set_facecolor(colors["panel"])
+    for spine in ax.spines.values():
+        spine.set_color(colors["spine"])
+    ax.tick_params(colors=colors["muted"], labelsize=9)
+    ax.grid(True, axis="y", color=colors["grid"], alpha=0.35, linewidth=0.8)
+
+    for col in pain_cols:
+        y = daily[col].to_numpy(dtype=float)
+        if np.isfinite(y).any():
+            label = col.replace("_", " ").title()
+            ax.plot(x, y, marker="o", linewidth=2.0, markersize=4.5, label=label)
+
+    ax.set_ylim(-0.2, 10.2)
+    ax.set_ylabel("Pain 0–10", color=colors["text"], fontsize=11)
+    ax.set_xlabel("Week", color=colors["muted"], fontsize=10)
+    ax.set_title(title, color=colors["text"], fontsize=14, pad=12)
+    ax.set_xticks(week_x)
+    ax.set_xticklabels(week_labels, color=colors["muted"])
+    if len(x) <= 1:
+        ax.set_xlim(-0.06, 1.06)
+    else:
+        ax.set_xlim(-0.03, 1.03)
+    legend = ax.legend(loc="upper left", frameon=False, fontsize=9)
+    for text_obj in legend.get_texts():
+        text_obj.set_color(colors["text"])
+    fig.tight_layout()
+    return fig
+
+
+def make_rehab_volume_plot(exercise_df: pd.DataFrame, title="Rehab Work Logged", theme="dark"):
+    colors = plot_theme(theme)
+    if exercise_df.empty:
+        raise ValueError("No rehab exercises to plot yet.")
+
+    df = exercise_df.copy()
+    df["work_units"] = (df["sets"].clip(lower=0) * df["reps"].clip(lower=0)).astype(float)
+    # Duration-only work still counts, but does not overwhelm set/rep work.
+    df["work_units"] = df["work_units"] + 5.0 * df["minutes"].clip(lower=0).astype(float)
+    daily = df.groupby(["date", "exercise"], as_index=False)["work_units"].sum()
+    pivot = daily.pivot(index="date", columns="exercise", values="work_units").fillna(0.0).sort_index()
+    pivot = pivot.loc[:, pivot.sum(axis=0).sort_values(ascending=False).index]
+
+    _, lookup, week_x, week_labels = _rehab_date_axis(pd.Series(pivot.index))
+    x = np.array([lookup[pd.Timestamp(d).normalize()] for d in pivot.index], dtype=float)
+    bar_width = compute_continuous_bar_width(x, default_width=0.05)
+
+    fig, ax = plt.subplots(figsize=(9.2, 5.2))
+    fig.patch.set_facecolor(colors["fig"])
+    ax.set_facecolor(colors["panel"])
+    for spine in ax.spines.values():
+        spine.set_color(colors["spine"])
+    ax.tick_params(colors=colors["muted"], labelsize=9)
+    ax.grid(True, axis="y", color=colors["grid"], alpha=0.35, linewidth=0.8)
+
+    lift_names = list(pivot.columns)
+    cmap = plt.get_cmap("tab20")
+    bottom = np.zeros(len(pivot), dtype=float)
+    denom = max(len(lift_names) - 1, 1)
+    for i, exercise in enumerate(lift_names):
+        vals = pivot[exercise].to_numpy(dtype=float)
+        ax.bar(x, vals, bottom=bottom, width=bar_width, color=cmap(i / denom), edgecolor=colors["edge"], linewidth=0.35, label=exercise)
+        bottom += vals
+
+    ax.set_ylabel("Work units: sets×reps + 5×minutes", color=colors["text"], fontsize=10)
+    ax.set_xlabel("Week", color=colors["muted"], fontsize=10)
+    ax.set_title(title, color=colors["text"], fontsize=14, pad=12)
+    ax.set_xticks(week_x)
+    ax.set_xticklabels(week_labels, color=colors["muted"])
+    ax.set_ylim(0, max(1.0, float(bottom.max()) * 1.12))
+    if len(x) <= 1:
+        ax.set_xlim(-0.06, 1.06)
+    else:
+        ax.set_xlim(-0.03, 1.03)
+    legend = ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.20), ncol=2, frameon=False, fontsize=9)
+    for text_obj in legend.get_texts():
+        text_obj.set_color(colors["text"])
+    fig.subplots_adjust(left=0.10, right=0.98, top=0.90, bottom=0.28)
+    return fig
+
+
+def make_rehab_effect_plot(pain_df: pd.DataFrame, exercise_df: pd.DataFrame, title="Exercise vs Next Pain Change", theme="dark"):
+    colors = plot_theme(theme)
+    pain_cols = ["right_hip", "neck", "ribs", "ankle"]
+    if pain_df.empty or exercise_df.empty:
+        raise ValueError("Need both pain logs and exercise logs for effect plot.")
+
+    pain_daily = pain_df.groupby("date", as_index=False)[pain_cols].median().sort_values("date")
+    pain_daily["total_pain"] = pain_daily[pain_cols].mean(axis=1, skipna=True)
+    pain_daily = pain_daily.dropna(subset=["total_pain"])
+    pain_by_date = {pd.Timestamp(row["date"]).normalize(): float(row["total_pain"]) for _, row in pain_daily.iterrows()}
+
+    rows = []
+    for date_value, day_df in exercise_df.groupby("date"):
+        d = pd.Timestamp(date_value).normalize()
+        today = pain_by_date.get(d)
+        next_pain = None
+        for offset in range(1, 4):
+            candidate = pain_by_date.get(d + pd.Timedelta(days=offset))
+            if candidate is not None:
+                next_pain = candidate
+                break
+        if today is None or next_pain is None:
+            continue
+        delta = next_pain - today
+        for exercise in sorted(day_df["exercise"].dropna().astype(str).unique()):
+            rows.append({"exercise": exercise, "delta": delta})
+
+    effects = pd.DataFrame(rows)
+    if effects.empty:
+        raise ValueError("Need pain logs on/after exercise days to estimate effect.")
+    summary = effects.groupby("exercise", as_index=False).agg(avg_delta=("delta", "mean"), n=("delta", "size"))
+    summary = summary[summary["n"] >= 1].sort_values("avg_delta")
+    summary = summary.head(12)
+
+    fig, ax = plt.subplots(figsize=(8.6, max(4.6, 0.42 * len(summary) + 1.2)))
+    fig.patch.set_facecolor(colors["fig"])
+    ax.set_facecolor(colors["panel"])
+    for spine in ax.spines.values():
+        spine.set_color(colors["spine"])
+    ax.tick_params(colors=colors["muted"], labelsize=9)
+    ax.grid(True, axis="x", color=colors["grid"], alpha=0.35, linewidth=0.8)
+
+    y = np.arange(len(summary))
+    vals = summary["avg_delta"].to_numpy(dtype=float)
+    ax.barh(y, vals, color=colors["accent"], edgecolor=colors["edge"], linewidth=0.45)
+    ax.axvline(0, color=colors["muted"], linewidth=1.0)
+    labels = [f'{r.exercise}  (n={int(r.n)})' for r in summary.itertuples()]
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, color=colors["muted"])
+    ax.invert_yaxis()
+    ax.set_xlabel("Avg next-log total pain change; lower is better", color=colors["text"], fontsize=10)
+    ax.set_title(title, color=colors["text"], fontsize=14, pad=12)
+    fig.tight_layout()
+    return fig
+
+
+@app.route("/rehab_pain.png", methods=["POST"])
+def rehab_pain_png():
+    try:
+        pain_df, exercise_df, controls = parse_rehab_payload(request.get_json() or {})
+        fig = make_rehab_pain_plot(pain_df, theme=controls["theme"])
+        buf = BytesIO()
+        fig.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor())
+        plt.close(fig)
+        buf.seek(0)
+        return Response(buf.getvalue(), mimetype="image/png")
+    except Exception as e:
+        return Response(f"Error generating rehab pain plot: {str(e)}", status=500)
+
+
+@app.route("/rehab_volume.png", methods=["POST"])
+def rehab_volume_png():
+    try:
+        pain_df, exercise_df, controls = parse_rehab_payload(request.get_json() or {})
+        fig = make_rehab_volume_plot(exercise_df, theme=controls["theme"])
+        buf = BytesIO()
+        fig.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor())
+        plt.close(fig)
+        buf.seek(0)
+        return Response(buf.getvalue(), mimetype="image/png")
+    except Exception as e:
+        return Response(f"Error generating rehab volume plot: {str(e)}", status=500)
+
+
+@app.route("/rehab_effect.png", methods=["POST"])
+def rehab_effect_png():
+    try:
+        pain_df, exercise_df, controls = parse_rehab_payload(request.get_json() or {})
+        fig = make_rehab_effect_plot(pain_df, exercise_df, theme=controls["theme"])
+        buf = BytesIO()
+        fig.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor())
+        plt.close(fig)
+        buf.seek(0)
+        return Response(buf.getvalue(), mimetype="image/png")
+    except Exception as e:
+        return Response(f"Error generating rehab effect plot: {str(e)}", status=500)
+
+
 if __name__ == "__main__":
     app.run(debug=True)
